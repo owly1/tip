@@ -20,7 +20,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["contract", "tipd", "cli", "stepup", "screen", "doctor", "attack", "eleven", "audio", "voice", "narrator", "pay", "ledger", "passport"]
+py-modules = ["contract", "tipd", "cli", "stepup", "screen", "doctor", "attack", "eleven", "audio", "voice", "narrator", "pay", "ledger", "passport", "contacts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

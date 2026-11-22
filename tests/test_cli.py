@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 import cli
+import contract
 
 AGENT_ENV = ("CLAUDECODE", "CURSOR_AGENT", "CURSOR_TRACE_ID", "TIP_PASSPORT")
 
@@ -235,6 +236,38 @@ def test_passport_voice_failed(stub):
                      "--daily", "1", "--for", "x"]) == 3
 
 
+def test_passport_short_form(stub):
+    stub.on("POST", "/passport", {"status": "issued", "token": "T", "passport": {}})
+    assert cli.main(["passport", "claude-code", "matthew", "@Sam", "max-50"]) == 0
+    assert stub.last[2] == {"agent": "claude-code", "to": ["matthew", "sam"], "max_cents": 5000,
+                            "daily_cents": 5000, "purpose": "tips", "expires_s": 86400}
+
+
+def test_passport_short_form_options(stub):
+    stub.on("POST", "/passport", {"status": "issued", "token": "T", "passport": {}})
+    cli.main(["passport", "claude-code", "matthew", "MAX-$7.50", "--expires", "7d", "--for", "team lunch"])
+    body = stub.last[2]
+    assert (body["max_cents"], body["daily_cents"], body["expires_s"], body["purpose"]) == (750, 750, 7 * 86400, "team lunch")
+
+
+@pytest.mark.parametrize("argv", [
+    [],
+    ["claude-code", "max-50"],                  # no names
+    ["claude-code", "matthew", "sam"],          # no max
+    ["claude-code", "matthew", "max-abc"],      # not an amount
+    ["claude-code", "max-5", "sam", "max-50"],  # max in the middle
+    # an unquoted reason or split value must never turn stray words into payees or the agent
+    ["claude-code", "sam", "--for", "team", "lunch", "max-5"],
+    ["claude-code", "matthew", "--for", "lunch", "with", "sam", "max-50"],
+    ["--for", "team", "lunch", "claude-code", "matthew", "max-50"],
+    ["claude-code", "sam", "--expires", "7", "d", "max-5"],
+    ["claude-code", "sam", "max-5", "--for", "team", "lunch"],
+])
+def test_passport_short_form_errors(stub, argv):
+    assert cli.main(["passport"] + argv) == 1
+    assert stub.requests == []
+
+
 # ---------------------------------------------------------------- verify / status / enroll / dispatch
 def test_verify(stub, capsys):
     entry = {"id": "tp_1", "to": "sam", "amount_cents": 500, "currency": "usd", "via": "voice",
@@ -267,3 +300,20 @@ def test_dispatch_vs_at_recipient(stub):
     assert stub.last[:2] == ("GET", "/verify/tp_1")
     cli.main(["@verify", "5"])
     assert stub.last[:2] == ("POST", "/tip") and stub.last[2]["to"] == "verify"
+
+
+# ---------------------------------------------------------------- link (phone notifications)
+def test_link(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(contract, "HOME", tmp_path)
+    assert cli.main(["link", "@Sam"]) == 0
+    out = capsys.readouterr().out
+    import contacts
+    ch = contacts.channel_for("sam")
+    assert ch and ch.startswith("tip-sam-") and f"subscribe to:  {ch}" in out
+    assert cli.main(["link", "sam", "my-own-channel"]) == 0 and contacts.channel_for("sam") == "my-own-channel"
+
+
+def test_link_bad_channel(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(contract, "HOME", tmp_path)
+    assert cli.main(["link", "sam", "no spaces allowed"]) == 1
+    assert "not an ntfy channel name" in capsys.readouterr().err

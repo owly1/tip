@@ -22,19 +22,21 @@ from typing import Optional
 import contract
 from contract import PassportRequest, TipRequest, TipResult
 
-SUBCOMMANDS = ("passport", "enroll", "verify", "status", "doctor")
+SUBCOMMANDS = ("passport", "enroll", "verify", "status", "doctor", "link")
 
 EXIT_HELP = """\
 exit codes: 0 paid, 1 error, 2 denied, 3 voice failed, 4 timed out
 
 other commands:
-  tip passport issue --agent NAME --to a,b --max 20 --daily 50 --for PURPOSE [--expires 24h]
+  tip passport <agent> <name>... max-<dollars> [--expires 24h] [--for "PURPOSE"]
+                            e.g. tip passport claude-code matthew sam max-50
   tip enroll [--samples 3]
   tip verify <id>
   tip status <id>
   tip doctor [--no-mic]     what's real, fake or missing (keys, mic, modules, tipd)
+  tip link <name> [channel] send <name> a phone notification (ntfy app) each time you tip them
 
-A recipient literally named passport/enroll/verify/status/doctor must be written with @ (tip @verify 5).
+A recipient literally named passport/enroll/verify/status/doctor/link must be written with @ (tip @verify 5).
 In PowerShell, @name is fine quoted ('@sam') or just drop the @ (tip sam 5)."""
 
 
@@ -275,7 +277,39 @@ def _emit(result: TipResult, as_json: bool, currency: str = contract.CURRENCY) -
     return result.exit_code
 
 
+def _short_passport(argv: list[str]) -> list[str]:
+    """tip passport claude-code matthew sam max-50 -> the long `issue` form.
+    max is the agent's budget per day, and so also its cap on any one payment."""
+    p = _Parser(prog="tip passport", usage='tip passport <agent> <name>... max-<dollars> [--expires 24h] [--for "PURPOSE"] [--json]',
+                description="Let an agent pay these people, up to max dollars a day, with no Voice ID.\n"
+                            "Anything over that, or to anyone else, still asks for your voice.\n"
+                            "Issuing the passport needs your Voice ID once.",
+                epilog="example: tip passport claude-code matthew sam max-50\n"
+                       "long form: tip passport issue --agent NAME --to a,b --max 20 --daily 50 --for PURPOSE",
+                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("words", nargs="+", metavar="agent name... max-<dollars>")
+    p.add_argument("--expires", default="24h", help="30m, 24h, 7d or seconds (default 24h)")
+    p.add_argument("--for", dest="purpose", default="tips", help="what the agent may pay for (default: tips)")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(argv)
+    words = a.words
+    # options only after max-: an unquoted `--for team lunch` among the names would turn "lunch" into a payee
+    if argv[:len(words)] != words:
+        p.error('put --for, --expires and --json after max-<dollars>, and quote a reason with spaces: --for "team lunch"')
+    if not words[-1].lower().startswith("max-"):
+        p.error("end with the most the agent may spend per day, like max-50")
+    names = words[1:-1]
+    if not names or any(w.lower().startswith("max-") for w in words[:-1]):
+        p.error("give the agent, then at least one name, then max-<dollars>: "
+                "tip passport claude-code matthew sam max-50")
+    amount = words[-1][4:]
+    return (["issue", "--agent", words[0], "--to", ",".join(names), "--max", amount, "--daily", amount,
+             "--for", a.purpose, "--expires", a.expires] + (["--json"] if a.json else []))
+
+
 def _passport(argv: list[str]) -> int:
+    if argv[:1] != ["issue"]:
+        argv = _short_passport(argv)
     p = _Parser(prog="tip passport", description="Issue a passport for an agent (needs your Voice ID).",
                 epilog=EXIT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="action", required=True, parser_class=_Parser)
@@ -405,8 +439,31 @@ def _doctor(argv: list[str]) -> int:
     return doctor.main(argv)
 
 
+def _link(argv: list[str]) -> int:
+    p = _Parser(prog="tip link", usage="tip link <name> [<ntfy channel>]",
+                description="Send <name> a phone notification each time you tip them.\n"
+                            "They install the free ntfy app and subscribe to the channel this prints.\n"
+                            "Give their own channel name instead if they already have one.",
+                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("who")
+    p.add_argument("channel", nargs="?")
+    a = p.parse_args(argv)
+    import contacts  # local file only, stdlib only
+    try:
+        ch = contacts.link(a.who, a.channel)
+    except (ValueError, OSError) as e:
+        _err(f"tip link: {e}")
+        return contract.Exit.ERROR
+    who = contract.normalize_to(a.who)
+    server = os.environ.get("TIP_NTFY_URL", "https://ntfy.sh").rstrip("/")
+    _say([f"linked @{who}: every tip to them now pings ntfy channel {ch}",
+          f"ask {who} to install the ntfy app and subscribe to:  {ch}",
+          f"  (or open {server}/{ch} in a browser)"])
+    return contract.Exit.PAID
+
+
 _DISPATCH = {"passport": _passport, "enroll": _enroll, "verify": _verify, "status": _status,
-             "doctor": _doctor}
+             "doctor": _doctor, "link": _link}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

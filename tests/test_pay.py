@@ -15,6 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pay  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def notified(monkeypatch):
+    """Never touch the real contacts file or network; record what would be pushed."""
+    calls = []
+    monkeypatch.setattr(pay.contacts, "notify", lambda *a, **k: calls.append((a, k)) or True)
+    # run the background notification inline so tests can see it
+    monkeypatch.setattr(pay.threading, "Thread", lambda target, args=(), kwargs=None, daemon=None:
+                        types.SimpleNamespace(start=lambda: target(*args, **(kwargs or {}))))
+    return calls
+
+
 def stub_client(monkeypatch, status="succeeded", receipt="https://pay.stripe.com/receipts/x"):
     calls = []
 
@@ -50,8 +61,19 @@ def test_charge_request_shape(monkeypatch):
 
 
 @pytest.mark.parametrize("status,receipt", [("requires_action", "https://r"), ("succeeded", None)])
-def test_unfinished_payment_raises(monkeypatch, status, receipt):
+def test_unfinished_payment_raises(monkeypatch, notified, status, receipt):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
     stub_client(monkeypatch, status=status, receipt=receipt)
     with pytest.raises(RuntimeError, match="not completed"):
         pay.charge("sam", 500, "usd", "coffee")
+    assert notified == []  # nobody is told about money that didn't move
+
+
+def test_recipient_is_notified_after_payment(monkeypatch, notified):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    monkeypatch.setattr(pay.contract, "OWNER", "matthew")
+    stub_client(monkeypatch)
+    pay.charge("sam", 550, "usd", "lunch")
+    (to, title, message), kw = notified[0]
+    assert (to, title, kw["click"]) == ("sam", "matthew sent you $5.50", "https://pay.stripe.com/receipts/x")
+    assert message.startswith("lunch")
