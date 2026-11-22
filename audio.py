@@ -3,8 +3,10 @@
 Signatures are fixed by contract.py (see the interfaces block there).
 Until this is real, run with TIP_FAKE=1 (or TIP_FAKE=audio) to use the fake.
 
-Pick devices with TIP_MIC / TIP_SPEAKER: an index or part of a name from
-`python -m sounddevice` (e.g. TIP_MIC="USB" for a clip-on mic at the demo).
+The first recording prints which mic is in use. The system default is used unless
+TIP_MIC / TIP_SPEAKER say otherwise: an index or part of a name from
+`python -m sounddevice`. Watch out: if AirPods or an iPhone are connected, macOS may
+make them the default mic. For the built-in mic on a MacBook, set TIP_MIC=MacBook.
 
 Quick check:  python audio.py   (beep, record 3 s, print the level, play it back)
 """
@@ -24,12 +26,29 @@ from contract import SAMPLE_RATE
 # almost always means the terminal running tipd has no microphone permission.
 SILENT_PEAK = 8
 
+_announced = False
+
 
 def _device(var: str):
     v = os.environ.get(var, "").strip()
     if not v:
         return None
     return int(v) if v.isdigit() else v
+
+
+def _input_info(dev) -> dict:
+    try:
+        return sd.query_devices(dev, kind="input")
+    except Exception as e:
+        raise RuntimeError(f"no usable microphone ({e}): plug one in, or set TIP_MIC to one "
+                           "listed by `python -m sounddevice`") from e
+
+
+def _resample(x: np.ndarray, sr_from: int, sr_to: int) -> np.ndarray:
+    """Band-limited FFT resample; only used when a device refuses to record at 16 kHz."""
+    n_out = int(round(x.size * sr_to / sr_from))
+    spec = np.fft.rfft(x)[: n_out // 2 + 1]
+    return (np.fft.irfft(spec, n_out) * (n_out / x.size)).astype(np.float32)
 
 
 def to_wav(samples: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
@@ -45,16 +64,27 @@ def from_wav(wav: bytes) -> tuple[np.ndarray, int]:
 
 
 def record(seconds: float) -> bytes:
-    frames = int(round(seconds * SAMPLE_RATE))
-    data = sd.rec(frames, samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                  device=_device("TIP_MIC"), blocking=True)
-    peak = int(np.abs(data.astype(np.int32)).max()) if data.size else 0
+    global _announced
+    dev = _device("TIP_MIC")
+    info = _input_info(dev)
+    if not _announced:
+        print(f"[audio] mic: {info['name']}", flush=True)
+        _announced = True
+    try:
+        x = sd.rec(int(round(seconds * SAMPLE_RATE)), samplerate=SAMPLE_RATE, channels=1,
+                   dtype="float32", device=dev, blocking=True)[:, 0]
+    except sd.PortAudioError:  # some Windows/Linux devices only record at their native rate
+        sr = int(info["default_samplerate"])
+        x = sd.rec(int(round(seconds * sr)), samplerate=sr, channels=1,
+                   dtype="float32", device=dev, blocking=True)[:, 0]
+        x = _resample(x, sr, SAMPLE_RATE)
+    peak = int(np.abs(x).max() * 32767) if x.size else 0
     if peak < SILENT_PEAK:
         raise RuntimeError(
             f"the mic recorded pure silence (peak {peak}): give the terminal running tipd "
             "microphone access (System Settings > Privacy & Security > Microphone), "
             "or set TIP_MIC to the right device")
-    return to_wav(data[:, 0])
+    return to_wav(np.clip(x, -1.0, 1.0))
 
 
 def play(wav: bytes) -> None:

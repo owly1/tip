@@ -7,6 +7,9 @@ The model (speechbrain/spkrec-ecapa-voxceleb, ~80 MB) downloads into HOME/models
 use. It starts loading in the background as soon as this module is imported, so it's warm
 by the time the person has finished speaking.
 
+Enrollment drops bad samples on its own: a sample with under half a second of speech
+(missed the beep) or one that doesn't sound like the others (noise, someone else talking).
+
 Standalone (no tipd or ElevenLabs needed):
   python voice.py enroll [n]          record n samples (default 5) from the mic and enroll
   python voice.py live <label>        record 4 s, print the score, log it
@@ -34,9 +37,11 @@ THRESHOLD: float = float(os.environ.get("TIP_VOICE_THRESHOLD", "0.5"))  # set fr
 
 MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
 VOICEPRINT = HOME / "voiceprint.npy"
-ENROLL_DIR = HOME / "enroll"          # the enrollment WAVs, kept for calibration + the clone demo
+ENROLL_DIR = HOME / "enroll"          # the kept enrollment WAVs, for calibration + the clone demo
 CALIBRATION = HOME / "calibration.csv"
 MIN_SAMPLES = SAMPLE_RATE // 10       # under 0.1 s of audio scores 0.0 instead of crashing
+MIN_SPEECH_S = 0.5                    # enrollment samples with less speech than this are dropped
+OUTLIER_GAP = 0.2                     # drop a sample this far below the others' median agreement
 
 # ---------------------------------------------------------------- model
 _model = None
@@ -50,9 +55,11 @@ def _get_model():
     with _model_lock:
         if _model is None:
             from speechbrain.inference.speaker import EncoderClassifier
+            from speechbrain.utils.fetching import LocalStrategy
             _model = EncoderClassifier.from_hparams(
                 source=MODEL_SOURCE, savedir=str(HOME / "models" / "ecapa"),
-                run_opts={"device": "cpu"})
+                run_opts={"device": "cpu"},
+                local_strategy=LocalStrategy.COPY)  # symlinks fail on Windows without admin
         return _model
 
 
@@ -78,18 +85,31 @@ def _decode(wav: bytes) -> np.ndarray:
     return x
 
 
+_HOP = SAMPLE_RATE // 100  # 10 ms frames
+
+
+def _loud(x: np.ndarray) -> np.ndarray:
+    """Per-10 ms frame: is this speech? Loud means within 20 dB of the loudest frame AND
+    10 dB above the room's noise floor, so a steady fan or hum doesn't count as speech."""
+    n = x.size // _HOP
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    rms = np.sqrt(np.mean(x[: n * _HOP].reshape(n, _HOP) ** 2, axis=1))
+    return rms > max(rms.max() * 0.1, np.percentile(rms, 10) * 3.16, 1e-4)
+
+
+def _speech_seconds(x: np.ndarray) -> float:
+    return float(_loud(x).sum()) * _HOP / SAMPLE_RATE
+
+
 def _speech_span(x: np.ndarray) -> np.ndarray:
-    """Cut the silence before and after the speech (frames within 20 dB of the loudest)."""
-    hop = SAMPLE_RATE // 100  # 10 ms
-    n = x.size // hop
-    if n < 10:
-        return x
-    rms = np.sqrt(np.mean(x[: n * hop].reshape(n, hop) ** 2, axis=1))
-    loud = np.flatnonzero(rms > max(rms.max() * 0.1, 1e-4))
-    if loud.size == 0 or (loud[-1] - loud[0] + 1) * hop < SAMPLE_RATE // 2:
+    """Cut the silence before and after the speech."""
+    loud = np.flatnonzero(_loud(x))
+    if loud.size == 0 or (loud[-1] - loud[0] + 1) * _HOP < SAMPLE_RATE // 2:
         return x  # can't find half a second of speech: keep everything
     pad = 10  # 100 ms either side
-    return x[max(0, loud[0] - pad) * hop: min(n, loud[-1] + 1 + pad) * hop]
+    n = x.size // _HOP
+    return x[max(0, loud[0] - pad) * _HOP: min(n, loud[-1] + 1 + pad) * _HOP]
 
 
 def _embed(x: np.ndarray) -> np.ndarray:
@@ -104,27 +124,59 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / (np.linalg.norm(v) + 1e-9)
 
 
+def _agreement(embs: np.ndarray) -> list[float]:
+    """Each sample vs the mean of the others (same speaker is usually 0.6-0.85)."""
+    if len(embs) < 2:
+        return []
+    return [float(embs[i] @ _unit(np.delete(embs, i, axis=0).mean(axis=0))) for i in range(len(embs))]
+
+
 # ---------------------------------------------------------------- contract
 def enroll(wavs: list[bytes]) -> None:
     if not wavs:
         raise ValueError("enroll needs at least one sample")
     xs = [_decode(w) for w in wavs]
-    if any(x.size < MIN_SAMPLES for x in xs):
-        raise ValueError("an enrollment sample is empty")
-    embs = np.stack([_embed(x) for x in xs])
 
+    dropped: list[str] = []
+    keep = []
+    for i, x in enumerate(xs):
+        s = _speech_seconds(x)
+        if s >= MIN_SPEECH_S:
+            keep.append(i)
+        else:
+            dropped.append(f"#{i + 1} no speech ({s:.1f}s)")
+    embs = {i: _embed(xs[i]) for i in keep}
+
+    if len(keep) >= 3:  # with 3+ samples an odd one out stands out against the median
+        agree = dict(zip(keep, _agreement(np.stack([embs[i] for i in keep]))))
+        cutoff = float(np.median(list(agree.values()))) - OUTLIER_GAP
+        for i in list(keep):
+            if agree[i] < cutoff:
+                keep.remove(i)
+                dropped.append(f"#{i + 1} didn't match the others ({agree[i]:.2f})")
+
+    need = min(2, len(wavs))
+    if len(keep) < need:
+        raise ValueError(f"only {len(keep)} of {len(wavs)} samples were usable ({'; '.join(dropped)}): "
+                         "speak clearly right after each beep and run `tip enroll` again")
+
+    kept = np.stack([embs[i] for i in keep])
     HOME.mkdir(parents=True, exist_ok=True)
-    np.save(VOICEPRINT, _unit(embs.mean(axis=0)))
+    np.save(VOICEPRINT, _unit(kept.mean(axis=0)))
     ENROLL_DIR.mkdir(parents=True, exist_ok=True)
     for old in ENROLL_DIR.glob("sample_*.wav"):
         old.unlink()
-    for i, w in enumerate(wavs, 1):
-        (ENROLL_DIR / f"sample_{i}.wav").write_bytes(w)
+    for n, i in enumerate(keep, 1):
+        (ENROLL_DIR / f"sample_{n}.wav").write_bytes(wavs[i])
 
-    msg = f"[voice] voiceprint saved from {len(wavs)} samples"
-    if len(embs) > 1:  # same-speaker sanity check: each sample vs the mean of the others
-        loo = [float(embs[i] @ _unit(np.delete(embs, i, axis=0).mean(axis=0))) for i in range(len(embs))]
-        msg += f"; each vs the rest: {', '.join(f'{s:.2f}' for s in loo)} (threshold {THRESHOLD:.2f})"
+    msg = f"[voice] voiceprint saved from {len(keep)} of {len(wavs)} samples"
+    if dropped:
+        msg += f" (dropped {'; '.join(dropped)})"
+    agree = _agreement(kept)
+    if agree:
+        msg += f"; agreement {', '.join(f'{s:.2f}' for s in agree)}"
+        if np.median(agree) < 0.5:
+            msg += "  WARNING: samples disagree, try a quieter spot or move closer to the mic"
     print(msg, flush=True)
 
 
