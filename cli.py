@@ -22,7 +22,7 @@ from typing import Optional
 import contract
 from contract import PassportRequest, TipRequest, TipResult
 
-SUBCOMMANDS = ("passport", "enroll", "verify", "status")
+SUBCOMMANDS = ("passport", "enroll", "verify", "status", "doctor")
 
 EXIT_HELP = """\
 exit codes: 0 paid, 1 error, 2 denied, 3 voice failed, 4 timed out
@@ -32,8 +32,9 @@ other commands:
   tip enroll [--samples 3]
   tip verify <id>
   tip status <id>
+  tip doctor [--no-mic]     what's real, fake or missing (keys, mic, modules, tipd)
 
-A recipient literally named passport/enroll/verify/status must be written with @ (tip @verify 5).
+A recipient literally named passport/enroll/verify/status/doctor must be written with @ (tip @verify 5).
 In PowerShell, @name is fine quoted ('@sam') or just drop the @ (tip sam 5)."""
 
 
@@ -399,7 +400,13 @@ def _status(argv: list[str]) -> int:
     return _emit(_as_result(body), a.json)
 
 
-_DISPATCH = {"passport": _passport, "enroll": _enroll, "verify": _verify, "status": _status}
+def _doctor(argv: list[str]) -> int:
+    import doctor  # local checks (keys, mic, modules); imported lazily so `tip` stays light
+    return doctor.main(argv)
+
+
+_DISPATCH = {"passport": _passport, "enroll": _enroll, "verify": _verify, "status": _status,
+             "doctor": _doctor}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

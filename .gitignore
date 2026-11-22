@@ -8,3 +8,13 @@ voiceprint*
 tip.md*
 tip.txt
 *.egg-info/
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.flac
+*.webm
+*.mov
+*.mp4
+recordings/
+voice_samples/
