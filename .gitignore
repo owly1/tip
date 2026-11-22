@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+*.wav
+voiceprint*
+.DS_Store
+tip.md*
+tip.txt

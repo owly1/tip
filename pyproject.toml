@@ -1,0 +1,26 @@
+[project]
+name = "tip"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "requests", "numpy", "sounddevice", "soundfile",
+  "elevenlabs", "stripe", "python-dotenv",
+  "speechbrain", "torch", "torchaudio",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+tip = "cli:main"
+tipd = "tipd:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["contract", "tipd", "cli", "stepup", "eleven", "audio", "voice", "pay", "ledger", "passport"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
