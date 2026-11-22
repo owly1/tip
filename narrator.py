@@ -73,11 +73,27 @@ def chunks(text: str) -> list[str]:
 
 
 def _settings():
+    """Looser stability = more natural, human variation; high similarity keeps the clone's
+    character; a little style adds warmth."""
     from elevenlabs import VoiceSettings
-    kw = dict(stability=0.55, similarity_boost=0.75, style=0.0, use_speaker_boost=True)
+    kw = dict(stability=0.4, similarity_boost=0.85, style=0.15, use_speaker_boost=True)
     if "speed" in getattr(VoiceSettings, "model_fields", {}):
-        kw["speed"] = 0.95  # a touch slower reads calmer
+        kw["speed"] = 0.97
     return VoiceSettings(**kw)
+
+
+def _mode() -> str:
+    """whole (default): the prompt in one take, so intonation flows across sentences.
+    splice: fixed parts cached separately (faster first byte, but audible joins)."""
+    return os.environ.get("TIP_NARRATOR_MODE", "").strip() or "whole"
+
+
+def _speakable(text: str) -> str:
+    """Small read-aloud fixes that keep the wording: 'claude-code' -> 'claude code',
+    'For: x' -> 'For x' (no robotic pause after 'For')."""
+    text = _for_speech(text)
+    text = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", text)
+    return text.replace("For: ", "For ")
 
 
 def _trim(x: np.ndarray, thr: float = 0.01, pad_s: float = 0.03) -> np.ndarray:
@@ -89,7 +105,8 @@ def _trim(x: np.ndarray, thr: float = 0.01, pad_s: float = 0.03) -> np.ndarray:
 
 
 def _synth(text: str, voice: str, model: str) -> np.ndarray:
-    key = hashlib.sha1(f"{voice}|{model}|{RATE}|{text}".encode("utf-8")).hexdigest()[:20]
+    settings = _settings()
+    key = hashlib.sha1(f"{voice}|{model}|{RATE}|{settings!r}|{text}".encode("utf-8")).hexdigest()[:20]
     path = CACHE / f"{key}.wav"
     if path.exists():
         x, _ = sf.read(path, dtype="float32")
@@ -97,7 +114,7 @@ def _synth(text: str, voice: str, model: str) -> np.ndarray:
     import eleven
     pcm = b"".join(eleven._api().text_to_speech.convert(
         voice_id=voice, text=text, model_id=model, output_format=f"pcm_{RATE}",
-        voice_settings=_settings(), request_options={"timeout_in_seconds": 15, "max_retries": 1}))
+        voice_settings=settings, request_options={"timeout_in_seconds": 15, "max_retries": 1}))
     x = _trim(np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0)
     CACHE.mkdir(parents=True, exist_ok=True)
     tmp = CACHE / f"{key}.tmp"
@@ -107,6 +124,10 @@ def _synth(text: str, voice: str, model: str) -> np.ndarray:
 
 
 def _render(text: str, voice: str, model: str) -> bytes:
+    if _mode() == "whole":
+        buf = io.BytesIO()
+        sf.write(buf, _synth(_speakable(text), voice, model), RATE, format="WAV", subtype="PCM_16")
+        return buf.getvalue()
     parts = chunks(text)
     with ThreadPoolExecutor(max_workers=4) as pool:
         audio = list(pool.map(lambda c: _synth(c, voice, model), parts))
