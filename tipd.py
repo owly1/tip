@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 import contract
+import screen
 import stepup
 from contract import PassportCheck, PassportRequest, TipRequest, TipResult, normalize_to
 
@@ -46,6 +47,18 @@ class Job:
         self.req, self.id, self.deadline = req, tip_id, deadline
         self.timed_out = False      # set by the handler; a late finish must not charge
         self.result: Optional[TipResult] = None
+        # the screen card is printed lazily (when Voice ID starts, or at the end) so two
+        # requests waiting on the mic don't interleave their cards
+        who = (req.agent or "").upper()
+        amt = screen.money(req.amount_cents) if isinstance(req.amount_cents, int) else str(req.amount_cents)
+        self.title = f"{who} WANTS TO PAY @{req.to} {amt}" if who else f"PAY @{req.to} {amt}"
+        self.lines: list[str] = [f"for: {req.reason}"] if req.reason else []
+        self.card_shown = False
+
+    def show_card(self) -> None:
+        if not self.card_shown:
+            self.card_shown = True
+            screen.card_open(self.title, self.lines)
 
     def left(self) -> float:
         return self.deadline - time.monotonic()
@@ -79,14 +92,20 @@ class Job:
             if check.result != "invalid" and check.passport is not None:
                 spent = ledger.spent_today(check.passport.id)
                 check = passport.check(r.passport, r.to, r.amount_cents, spent)
+            pid = f"passport {check.passport.id[:7]}…" if check.passport is not None else "passport"
             if check.result == "invalid":
+                self.lines.append(f"{pid} · rejected: {check.reason}")
                 return self._res("denied", message=f"passport rejected: {check.reason}", passport=check)
             if check.passport is not None:
                 agent = check.passport.agent
             if check.result == "ok":
+                self.lines.append(f"{pid} · ok → paying")
                 return self._pay(via="passport", approver=check.passport.id, agent=agent,
                                  voice=None, check=check)
             # out_of_scope -> fall through to Voice ID
+            self.lines.append(f"{pid} · out of scope: {screen._cents_to_dollars(check.reason)} → voice ID")
+        else:
+            self.lines.append("no passport → voice ID")
 
         prompt = f"{contract.OWNER.title()}, {agent or 'someone'} wants to pay {r.to} {dollars(r.amount_cents)}."
         if r.reason:
@@ -99,6 +118,7 @@ class Job:
         try:
             if self.left() <= 0:
                 raise TipTimeout("timed out before Voice ID")
+            self.show_card()
             vc = stepup.voice_id(prompt)
         finally:
             MIC.release()
@@ -212,10 +232,10 @@ class Handler(BaseHTTPRequestHandler):
             self.server.results[tip_id] = res
         else:
             res = job.result
-        print(f"[tipd] tip {tip_id} -> {res.to} {req.amount_cents}c agent={req.agent} "
+        _close_card(job, res)
+        screen.plain(f"[tipd] tip {tip_id} -> {res.to} {req.amount_cents}c agent={req.agent} "
               f"passport={'yes' if req.passport else 'no'} -> {res.status}"
-              + (f" via {res.via}" if res.via else "") + (f" ({res.message})" if res.message else ""),
-              flush=True)
+              + (f" via {res.via}" if res.via else "") + (f" ({res.message})" if res.message else ""))
         self._send(200, res.to_dict())
 
     def _finish(self, job: Job):
@@ -247,17 +267,29 @@ class Handler(BaseHTTPRequestHandler):
             res = TipResult(status="timeout", message="timed out waiting for the mic")
             return self._send(200, res.to_dict())
         try:
+            screen.card_open(f"ISSUE PASSPORT FOR {req.agent.upper()}", [
+                "to: " + ", ".join("@" + t for t in req.to),
+                f"max {screen.money(req.max_cents)} per payment · {screen.money(req.daily_cents)} per day",
+                *([f"purpose: {req.purpose}"] if req.purpose else []),
+                f"expires in {_human_secs(req.expires_s)}"])
             vc = stepup.voice_id(prompt)
+        except Exception:
+            screen.card_close()
+            raise
         finally:
             MIC.release()
         if not vc.passed:
             why = "wrong words" if not vc.words_ok else "wrong voice"
-            print(f"[tipd] passport for {req.agent} -> voice_failed ({why})", flush=True)
+            screen.verdict(False, f"REFUSED: {why}")
+            screen.card_close("no passport issued")
+            screen.plain(f"[tipd] passport for {req.agent} -> voice_failed ({why})")
             return self._send(200, TipResult(status="voice_failed", via="voice", voice=vc,
                                              message=f"Voice ID failed: {why}").to_dict())
         token, p = contract.load("passport").issue(req)
-        print(f"[tipd] passport {p.id} issued for {p.agent} -> {p.to} max={p.max_cents}c "
-              f"daily={p.daily_cents}c", flush=True)
+        screen.verdict(True, "APPROVED")
+        screen.card_close(f"passport {p.id} issued → {p.agent}")
+        screen.plain(f"[tipd] passport {p.id} issued for {p.agent} -> {p.to} max={p.max_cents}c "
+                     f"daily={p.daily_cents}c")
         self._send(200, {"status": "issued", "token": token, "passport": asdict(p)})
 
     def _post_enroll(self):
@@ -267,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(d.get("samples") or 3)
         with MIC:
             stepup.enroll(n)
-        print(f"[tipd] enrolled {n} samples", flush=True)
+        screen.plain(f"[tipd] enrolled {n} samples")
         self._send(200, {"status": "enrolled"})
 
     def _get_verify(self, tip_id: str):
@@ -275,6 +307,36 @@ class Handler(BaseHTTPRequestHandler):
         entry = ledger.get(tip_id)
         ok = bool(entry is not None and ledger.verify(tip_id))
         self._send(200, {"ok": ok, "entry": asdict(entry) if entry is not None else None})
+
+
+def _human_secs(s: int) -> str:
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if s >= n and s % n == 0:
+            return f"{s // n}{unit}"
+    return f"{s}s"
+
+
+def _close_card(job: Job, res: TipResult) -> None:
+    """Verdict + result for one /tip. Screen only; never raises."""
+    try:
+        job.show_card()
+        if res.status == "paid":
+            screen.verdict(True, "APPROVED" if res.via == "voice" else "APPROVED BY PASSPORT")
+            screen.card_close(f"paid {screen.money(res.amount_cents)} → @{res.to} · {res.id}",
+                              res.receipt_url or "")
+            return
+        if res.status == "voice_failed":
+            why = "wrong words" if res.voice is not None and not res.voice.words_ok else "wrong voice"
+            screen.verdict(False, f"REFUSED: {why}")
+        elif res.status == "timeout":
+            screen.verdict(False, "TIMED OUT")
+        elif res.status == "denied":
+            screen.verdict(False, f"DENIED: {res.message}")
+        else:
+            screen.verdict(False, f"ERROR: {res.message}")
+        screen.card_close("nothing was charged")
+    except Exception:
+        pass
 
 
 class TipServer(ThreadingHTTPServer):
@@ -294,8 +356,7 @@ def main() -> None:
     srv = make_server()
     fake = sorted(n for n in contract.MODULES if contract.is_fake(n))
     host, port = srv.server_address[:2]
-    print(f"tipd listening on http://{host}:{port}", flush=True)
-    print(f"fake modules: {', '.join(fake) if fake else 'none'}", flush=True)
+    screen.banner(f"http://{host}:{port}", fake)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
