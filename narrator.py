@@ -12,6 +12,8 @@ speak(text) -> WAV bytes, same as eleven.speak, so stepup swaps one call.
 - Any failure falls back to eleven.speak(text), so a prompt is never lost.
 
 Try voices:  python narrator.py try sarah jessica lily
+Your voice:  python narrator.py clone <name> [seconds]   (read SCRIPT aloud; prints the voice id
+             to put in .env as TIP_NARRATOR_VOICE). Don't clone the person who approves payments.
 """
 from __future__ import annotations
 
@@ -141,6 +143,27 @@ def warm() -> None:
 SAMPLE = ("Matthew, claude-code wants to pay weatherapi $5. "
           "After the beep, say: lucky badger ninety one. Or say decline.")
 
+
+def clone_from_mic(name: str, seconds: float = 65.0) -> str:
+    """Record `seconds` of the narrator reading at the mic's native rate (better clone
+    quality than 16 kHz), make an ElevenLabs instant clone, return its voice id."""
+    import sounddevice as sd
+    import audio
+    import eleven
+    dev = audio._device("TIP_MIC")
+    sr = int(sd.query_devices(dev, kind="input")["default_samplerate"])
+    audio.beep()
+    x = sd.rec(int(seconds * sr), samplerate=sr, channels=1, dtype="float32", device=dev,
+               blocking=True)[:, 0]
+    audio.beep()
+    if np.abs(x).max() < 0.02:
+        raise RuntimeError("the recording is nearly silent: check the mic and try again")
+    buf = io.BytesIO()
+    sf.write(buf, x, sr, format="WAV", subtype="PCM_16")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    (CACHE / f"clone_source_{name}.wav").write_bytes(buf.getvalue())
+    return eleven.clone(f"tip narrator ({name})", [buf.getvalue()])
+
 if __name__ == "__main__":
     try:
         from dotenv import load_dotenv
@@ -160,5 +183,11 @@ if __name__ == "__main__":
             print(f"{name}: generated in {time.perf_counter() - t:.1f}s", flush=True)
             audio.play(wav)
             time.sleep(1.0)
+    elif args[:1] == ["clone"]:
+        import audio
+        name = args[1] if len(args) > 1 else "narrator"
+        vid = clone_from_mic(name, float(args[2]) if len(args) > 2 else 65.0)
+        print(f"narrator voice id: {vid}", flush=True)
+        audio.play(_render(SAMPLE, vid, _model()))
     else:
         print(__doc__)
