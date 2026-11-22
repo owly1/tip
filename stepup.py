@@ -10,6 +10,11 @@ import threading
 
 import contract
 import screen
+
+try:  # an old `pip install -e .` doesn't know narrator.py yet: keep the stock voice, don't crash
+    import narrator as _voice_out
+except ImportError:
+    _voice_out = None
 from typing import Optional
 
 from contract import VoiceCheck
@@ -69,12 +74,11 @@ def _say_then_record(text: str, phrase: str) -> bytes:
     """Play the prompt, beep, then record. Recording starts only after playback ends,
     so the mic never hears the laptop saying the phrase."""
     audio = contract.load("audio")
-    eleven = contract.load("eleven")
     try:
         _set_challenge("speaking", phrase, new=True)
         screen.speaking()
         screen.say(phrase)
-        audio.play(eleven.speak(text))
+        audio.play((_voice_out or contract.load("eleven")).speak(text))
         audio.beep()
         _set_challenge("listening", phrase)
         screen.listening(contract.RECORD_S)
