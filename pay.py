@@ -1,14 +1,40 @@
 """Stripe test payments. Owner: Jasper.
 
 Signatures are fixed by contract.py (see the interfaces block there).
-Until this is real, run with TIP_FAKE=1 (or TIP_FAKE=pay) to use the fake.
+Sandbox only: refuses any key that isn't a test key.
 """
 from __future__ import annotations
 
-from typing import Optional
+import os
+import uuid
 
-from contract import HOME, LedgerEntry, Passport, PassportCheck, PassportRequest, Payment  # noqa: F401
+import stripe
+
+from contract import Payment
+
+TEST_CARD = "pm_card_visa"  # Stripe's test card; never taken from input
 
 
 def charge(to: str, amount_cents: int, currency: str, description: str) -> Payment:
-    raise NotImplementedError("Jasper: charge")
+    key = os.environ.get("STRIPE_SECRET_KEY", "")
+    if "_test_" not in key:
+        raise RuntimeError("STRIPE_SECRET_KEY must be a Stripe test key (sk_test_...); refusing to charge")
+    client = stripe.StripeClient(key)
+    pi = client.v1.payment_intents.create(
+        params={
+            "amount": amount_cents,
+            "currency": currency,
+            "confirm": True,
+            "payment_method": TEST_CARD,
+            "automatic_payment_methods": {"enabled": True, "allow_redirects": "never"},  # no return_url needed
+            "description": description,
+            "metadata": {"to": to},
+            "expand": ["latest_charge"],
+        },
+        # one key per call: the library's own network retries can't double-charge
+        options={"idempotency_key": str(uuid.uuid4())},
+    )
+    receipt = getattr(pi.latest_charge, "receipt_url", None)
+    if pi.status != "succeeded" or not receipt:
+        raise RuntimeError(f"Stripe payment {pi.id} not completed (status {pi.status}); not retrying")
+    return Payment(id=pi.id, receipt_url=receipt)
