@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Optional
 
@@ -17,8 +18,7 @@ import contract
 from contract import LedgerEntry
 
 GENESIS = "0" * 64
-# shortcut: single writer (tipd), no file lock; add one if two processes write. The lock covers tipd's threads.
-_LOCK = threading.Lock()
+_LOCK = threading.Lock()  # tipd's threads; _file_lock covers separate `tip` processes
 _DAMAGED = (ValueError, TypeError, AttributeError)  # bad JSON, unknown field, non-object line
 
 
@@ -39,10 +39,32 @@ def _hash(prev: str, entry: dict) -> str:
     return hashlib.sha256((prev + json.dumps(entry, sort_keys=True)).encode("utf-8")).hexdigest()
 
 
+@contextmanager
+def _file_lock():
+    contract.HOME.mkdir(parents=True, exist_ok=True)
+    with open(contract.HOME / "ledger.lock", "a+b") as f:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+
 # shortcut: an unreadable last line (crash mid-write) makes append raise after tipd has charged;
 # pass the tip id into charge() so Stripe metadata can reconcile, if that ever happens
 def append(entry: dict) -> LedgerEntry:
-    with _LOCK:
+    with _LOCK, _file_lock():
         lines = _lines()
         prev = json.loads(lines[-1])["hash"] if lines else GENESIS  # last line only: a tampered middle still appends
         e = LedgerEntry(**entry, prev_hash=prev, hash=_hash(prev, entry))  # bad fields raise before writing

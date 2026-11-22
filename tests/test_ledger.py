@@ -77,3 +77,27 @@ def test_spent_today_only_today_and_only_that_passport():
     ledger.append(row(2, approver="pp_b", amount=999))
     ledger.append(row(3, approver="pp_a", amount=700, ts=time.time() - 86400))
     assert ledger.spent_today("pp_a") == 500
+
+
+def _append_many(home, prefix, n):
+    import os as _os
+    _os.environ["TIP_HOME"] = home
+    import contract as _c
+    import ledger as _l
+    from pathlib import Path as _P
+    _c.HOME = _P(home)
+    for i in range(n):
+        _l.append({**row(0), "id": f"tp_{prefix}{i:08x}"})
+
+
+def test_parallel_processes_keep_one_chain(home):
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_append_many, args=(str(home), f"{p:02x}", 15)) for p in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    lines = (home / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 60
+    assert ledger.verify(json.loads(lines[-1])["id"])  # every link intact: no two writers shared a prev_hash

@@ -31,7 +31,14 @@ def _key() -> Optional[bytes]:
 
 def _new_key() -> bytes:
     contract.HOME.mkdir(parents=True, exist_ok=True)
-    fd = os.open(contract.HOME / "passport.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        fd = os.open(contract.HOME / "passport.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:  # another `tip` made it first: use theirs
+        for _ in range(50):
+            if (k := _key()):
+                return k
+            time.sleep(0.01)
+        raise
     with os.fdopen(fd, "wb") as f:
         f.write(secrets.token_bytes(32))
     return _key()

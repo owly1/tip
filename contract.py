@@ -38,7 +38,15 @@ TIMEOUT_S = 60          # whole payment, including Voice ID
 RECORD_S = 4.0          # Voice ID recording length
 SAMPLE_RATE = 16000
 CURRENCY = "usd"
-OWNER = os.environ.get("TIP_OWNER", "matthew")
+def _me() -> str:
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return "you"
+
+
+OWNER = os.environ.get("TIP_OWNER") or _me()  # whoever runs tip; TIP_OWNER to show another name
 HOME = Path(os.environ.get("TIP_HOME", str(Path.home() / ".tip")))  # voiceprint, ledger, keys
 
 

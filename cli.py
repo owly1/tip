@@ -1,7 +1,8 @@
 """tip CLI. Owner: Matthew.
 
-Talks HTTP to tipd and nothing else: no keys, no audio, no Stripe here, so an agent
-running `tip` can't get around the checks tipd does.
+Talks HTTP to tipd. If no tipd is running, `tip` runs tipd's server inside this one process
+for this one command (one terminal, nothing left running afterwards); tipd's checks are the same.
+`--dev` (or TIP_DEV=1) shows the full Voice ID screen, scores, thresholds and logs.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +37,7 @@ other commands:
   tip status <id>
   tip doctor [--no-mic]     what's real, fake or missing (keys, mic, modules, tipd)
   tip link <name> [channel] send <name> a phone notification (ntfy app) each time you tip them
+  tip --dev <who> <amount>  show the full Voice ID screen, scores and thresholds
 
 A recipient literally named passport/enroll/verify/status/doctor/link must be written with @ (tip @verify 5).
 In PowerShell, @name is fine quoted ('@sam') or just drop the @ (tip sam 5)."""
@@ -46,6 +49,10 @@ class _UsageError(Exception):
 
 class _TipdDown(Exception):
     pass
+
+
+class _TipdAbsent(_TipdDown):
+    """Connection refused: nothing reached tipd, so running the command locally can't repeat it."""
 
 
 class _Parser(argparse.ArgumentParser):
@@ -108,11 +115,57 @@ def money(cents: Optional[int], currency: str = contract.CURRENCY) -> str:
 
 # ---------------------------------------------------------------- HTTP
 def tipd_url() -> str:
-    return (os.environ.get("TIPD_URL") or contract.TIPD_URL).rstrip("/")
+    return (_LOCAL_URL or os.environ.get("TIPD_URL") or contract.TIPD_URL).rstrip("/")
+
+
+_DEV = False          # --dev / TIP_DEV=1
+_QUIET = True         # local screen: just the phrase to speak (enrollment shows the full screen)
+_LOCAL = None         # (server, thread) while this process runs the pipeline itself
+_LOCAL_URL: Optional[str] = None
+
+
+def _start_local() -> bool:
+    """No tipd running: serve tipd's API from inside this process, for this one command."""
+    global _LOCAL, _LOCAL_URL
+    if _LOCAL is not None or os.environ.get("TIPD_URL"):
+        return False  # an explicit TIPD_URL means that tipd, not a local one
+    import screen
+    screen.OUT = sys.stderr  # the human sees it; --json on stdout stays clean for agents
+    screen.QUIET = _QUIET and not _DEV
+    import tipd
+    srv = tipd.make_server("127.0.0.1", 0)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    _LOCAL, _LOCAL_URL = (srv, th), f"http://127.0.0.1:{srv.server_address[1]}"
+    return True
+
+
+def _finish_local() -> None:
+    """Before exiting, let a payment, its ledger line and the recipient's notification finish."""
+    global _LOCAL, _LOCAL_URL
+    if _LOCAL is None:
+        return
+    srv, _ = _LOCAL
+    deadline = time.monotonic() + 30
+    for t in threading.enumerate():
+        if t.name.startswith("tip-") and t is not threading.current_thread():
+            t.join(max(0.0, deadline - time.monotonic()))
+    srv.shutdown()
+    srv.server_close()
+    _LOCAL, _LOCAL_URL = None, None
 
 
 def _request(method: str, path: str, body: Optional[dict] = None, timeout: float = 15):
     """Returns (http_status, parsed_json). Raises _TipdDown or TimeoutError."""
+    try:
+        return _send(method, path, body, timeout)
+    except _TipdAbsent:
+        if not _start_local():
+            raise
+        return _send(method, path, body, timeout)
+
+
+def _send(method: str, path: str, body: Optional[dict], timeout: float):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(tipd_url() + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
@@ -124,10 +177,14 @@ def _request(method: str, path: str, body: Optional[dict] = None, timeout: float
     except urllib.error.URLError as e:
         if isinstance(e.reason, (TimeoutError, socket.timeout)):
             raise TimeoutError() from e
+        if isinstance(e.reason, ConnectionRefusedError):
+            raise _TipdAbsent() from e
         raise _TipdDown() from e
     except (TimeoutError, socket.timeout):
         raise
-    except (ConnectionError, OSError) as e:
+    except ConnectionRefusedError as e:
+        raise _TipdAbsent() from e
+    except (ConnectionError, OSError) as e:  # e.g. dropped mid-request: it may have paid, never re-run
         raise _TipdDown() from e
 
 
@@ -203,6 +260,27 @@ def format_result(result: TipResult, currency: str = contract.CURRENCY) -> list[
     return lines
 
 
+def short_result(result: TipResult, currency: str = contract.CURRENCY) -> list[str]:
+    """The default one-liner; --dev shows format_result's details."""
+    s, v = result.status, result.voice
+    if s == "paid":
+        return [f"✓ transfer approved · {money(result.amount_cents, currency)} to @{result.to}"
+                + (f" · {result.receipt_url}" if result.receipt_url else "")]
+    if v is not None and getattr(v, "declined", False):
+        return ["✗ declined"]
+    if s == "voice_failed":
+        if v is not None and not v.words_ok:
+            return ["✗ invalid words"]
+        return ["✗ invalid voice" if v is not None and not v.voice_ok else "✗ voice check failed"]
+    if s == "denied":
+        return [f"✗ denied: {result.message or 'not allowed'}"]
+    if s == "timeout":
+        return ["✗ timed out"]
+    if s == "pending":
+        return [f"… pending {result.id or ''}".rstrip()]
+    return [f"✗ error: {result.message or 'unknown error'}"]
+
+
 def _say(lines, stream=None):
     stream = stream or sys.stdout
     for line in lines:
@@ -251,7 +329,7 @@ def _pay(argv: list[str]) -> int:
     req = TipRequest(to=to, amount_cents=cents, currency=a.currency.lower(),
                      reason=a.reason, agent=a.agent or detect_agent(), passport=passport)
 
-    if not a.json:
+    if not a.json and _DEV:
         hint = ("checking passport... (may ask for voice approval)" if passport
                 else "waiting for voice approval... speak when the laptop asks")
         _err(hint)
@@ -273,7 +351,7 @@ def _emit(result: TipResult, as_json: bool, currency: str = contract.CURRENCY) -
     if as_json:
         print(json.dumps(result.to_dict()))
     else:
-        _say(format_result(result, currency))
+        _say(format_result(result, currency) if _DEV else short_result(result, currency))
     return result.exit_code
 
 
@@ -366,23 +444,105 @@ def _passport(argv: list[str]) -> int:
     return contract.Exit.PAID
 
 
+_KEYS = (
+    ("STRIPE_SECRET_KEY", "Stripe test secret key, sk_test_... (Stripe dashboard > Developers > API keys)"),
+    ("ELEVENLABS_API_KEY", "ElevenLabs API key (elevenlabs.io > Developers > API keys)"),
+)
+
+
+def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv()
+    load_dotenv(contract.HOME / ".env")
+
+
+def _check_key(name: str, value: str) -> Optional[str]:
+    """None if the key works; else what's wrong. Read-only calls that cost nothing."""
+    if name == "STRIPE_SECRET_KEY":
+        if not value.startswith(("sk_test_", "rk_test_")):
+            return "that isn't a Stripe test key (it starts with sk_test_); tip never uses live keys"
+        req = urllib.request.Request("https://api.stripe.com/v1/balance", headers={"Authorization": f"Bearer {value}"})
+    else:
+        req = urllib.request.Request("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": value})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return None
+    except urllib.error.HTTPError as e:
+        return f"the service rejected that key (HTTP {e.code})" if e.code in (401, 403) else None
+    except Exception:
+        _err("  (couldn't reach the service to check it; saving it anyway)")
+        return None
+
+
+def _save_key(name: str, value: str) -> None:
+    path = contract.HOME / ".env"
+    contract.HOME.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    lines = [l for l in lines if not l.startswith(name + "=")] + [f"{name}={value}"]
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # only you can read your keys
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+
+
+def _setup_keys(force: bool = False) -> bool:
+    """Ask for each missing key (typing is hidden), check it, save it to ~/.tip/.env."""
+    import getpass
+    _load_env()
+    for name, what in _KEYS:
+        if os.environ.get(name) and not force:
+            continue
+        for _ in range(3):
+            value = getpass.getpass(f"{what}: ").strip()
+            if not value:
+                _err(f"  skipped; add it later with: tip enroll --keys")
+                break
+            problem = _check_key(name, value)
+            if problem is None:
+                _save_key(name, value)
+                os.environ[name] = value
+                _err(f"  ✓ saved to {contract.HOME / '.env'}")
+                break
+            _err(f"  ✗ {problem}")
+        else:
+            return False
+    return True
+
+
 def _enroll(argv: list[str]) -> int:
-    p = _Parser(prog="tip enroll", description="Record your voiceprint (tipd owns the mic).")
+    global _QUIET
+    p = _Parser(prog="tip enroll", description="Set tip up: your keys (asked once), then your voiceprint.")
     p.add_argument("--samples", type=int, default=3)
+    p.add_argument("--keys", action="store_true", help="enter your keys again even if they're already set")
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
     if a.samples < 1:
         _err("tip enroll: --samples must be at least 1")
         return contract.Exit.ERROR
+    if not a.json and sys.stdin.isatty() and not _setup_keys(force=a.keys):
+        return contract.Exit.ERROR
+    _QUIET = False  # enrollment shows the full screen: which sample, the phrase, the countdown
     if not a.json:
-        _err(f"recording {a.samples} samples... follow the prompts from the speakers")
+        _err(f"recording {a.samples} samples: read each phrase after the beep. "
+             "If your computer asks to use the microphone, click Allow.")
     timeout = a.samples * (contract.RECORD_S + 15) + 60
     try:
         _, body = _request("POST", "/enroll", {"samples": a.samples}, timeout=timeout)
     except TimeoutError:
         return _emit(TipResult(status="timeout", message="enrollment timed out"), a.json)
     if body.get("status") == "enrolled":
-        print(json.dumps(body) if a.json else "enrolled: your voiceprint is saved")
+        if a.json:
+            print(json.dumps(body))
+        else:
+            _say(["enrolled: your voiceprint is saved. You're set up.",
+                  "  pay someone:              tip sam 5",
+                  "  notify them on a phone:   tip link sam",
+                  "  let an agent pay:         tip passport claude-code sam max-20",
+                  "  see every check:          tip --dev sam 5"])
         return contract.Exit.PAID
     return _emit(_as_result(body), a.json)
 
@@ -467,8 +627,14 @@ _DISPATCH = {"passport": _passport, "enroll": _enroll, "verify": _verify, "statu
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    global _DEV, _QUIET
     _fix_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
+    _DEV = "--dev" in argv or os.environ.get("TIP_DEV") == "1"
+    if _DEV:
+        os.environ["TIP_DEV"] = "1"  # so tipd's modules (narrator, ...) show their details too
+    _QUIET = True
+    argv = [x for x in argv if x != "--dev"]
     try:
         if argv and argv[0] in _DISPATCH:
             return _DISPATCH[argv[0]](argv[1:])
@@ -483,6 +649,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     except KeyboardInterrupt:
         _err("cancelled")
         return contract.Exit.ERROR
+    finally:
+        _finish_local()
 
 
 def entry() -> None:

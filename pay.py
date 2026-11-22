@@ -42,8 +42,8 @@ def charge(to: str, amount_cents: int, currency: str, description: str) -> Payme
         raise RuntimeError(f"Stripe payment {pi.id} not completed (status {pi.status}); not retrying")
     amount = f"${amount_cents / 100:.2f}" if currency.lower() == "usd" else f"{amount_cents / 100:.2f} {currency.upper()}"
     # in the background: a slow ntfy must not push tipd past its deadline after the money has moved.
-    # daemon is fine because tipd outlives it; a short-lived process would have to join() it
-    threading.Thread(target=contacts.notify, daemon=True,
+    # a one-terminal `tip` joins it (and the payment thread) before exiting: cli._finish_local
+    threading.Thread(target=contacts.notify, daemon=True, name="tip-notify",
                      args=(to, f"{contract.OWNER} sent you {amount}", f"{description}\nTest payment · tap for the receipt"),
                      kwargs={"click": receipt}).start()
     return Payment(id=pi.id, receipt_url=receipt)

@@ -2,7 +2,8 @@
 
 speak(text) -> WAV bytes, same as eleven.speak, so stepup swaps one call.
 
-- Terry's cloned voice by default (TIP_NARRATOR_VOICE: a name from VOICES or a voice id)
+- A stock voice every ElevenLabs account has (sarah) by default. TIP_NARRATOR_VOICE picks another: a name from
+  VOICES or a voice id (TIP_NARRATOR_VOICE=terry for the team's cloned narrator, on the team account only)
   on eleven_multilingual_v2 (TIP_NARRATOR_MODEL; eleven_v3 sounds richer but takes ~5 s),
   at 24 kHz instead of 16 kHz. The clone lives on the team's ElevenLabs account, so other
   keys fall back to eleven.speak.
@@ -39,14 +40,15 @@ VOICES = {
     "lily": "pFZP5JQG7iQjIQuC4Bku",     # velvety, British
     "matilda": "XrExE9yKIg1WjnnlVkGX",  # calm, professional
 }
-DEFAULT_VOICE = "terry"
+DEFAULT_VOICE = "sarah"  # premade: works on any account
 DEFAULT_MODEL = "eleven_multilingual_v2"
 RATE = 24000
-FIXED = ("After the beep, say:", "After the beep, read:", "Or say decline.", "One more.")
+FIXED = ("Verification required: speak", "After the beep, read:", "Or say decline.", "One more.")
 CACHE = HOME / "narrator"
 GAP_S = 0.3          # pause between sentences
 GAP_BEFORE_PHRASE_S = 0.2
 
+_failed = False  # this account can't use the narrator voice: don't pay for a failing call every prompt
 _SPLIT = re.compile("(" + "|".join(re.escape(f) for f in FIXED) + ")")
 
 
@@ -149,11 +151,17 @@ def speak(text: str) -> bytes:
     eleven = contract.load("eleven")
     if contract.is_fake("eleven"):
         return eleven.speak(text)
-    try:
-        return _render(text, _voice_id(), _model())
-    except Exception as e:  # never lose a prompt: fall back to the plain voice
-        print(f"[narrator] falling back to the default voice: {type(e).__name__}: {e}", flush=True)
-        return eleven.speak(text)
+    global _failed
+    if not _failed:
+        try:
+            return _render(text, _voice_id(), _model())
+        except Exception as e:  # never lose a prompt: fall back to the plain voice, and stop retrying
+            _failed = True
+            if os.environ.get("TIP_DEV") == "1":
+                status = getattr(e, "status_code", None)
+                print(f"[narrator] voice {os.environ.get('TIP_NARRATOR_VOICE') or DEFAULT_VOICE!r} unavailable"
+                      f"{f' (HTTP {status})' if status else ''}; using the default voice", file=sys.stderr, flush=True)
+    return eleven.speak(text)
 
 
 def warm() -> None:

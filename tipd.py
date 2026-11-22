@@ -22,6 +22,8 @@ from contract import PassportCheck, PassportRequest, TipRequest, TipResult, norm
 try:  # keys live in .env; fine to run without it in fake mode
     from dotenv import load_dotenv
     load_dotenv()
+    load_dotenv(contract.HOME / ".env")  # where `tip enroll` saves keys; works for a pipx install too
+    contract.OWNER = os.environ.get("TIP_OWNER") or contract.OWNER  # a name set in .env, not only the shell
 except Exception:
     pass
 
@@ -108,11 +110,13 @@ class Job:
         else:
             self.lines.append("no passport → voice ID")
 
-        prompt = f"{contract.OWNER.title()}, {agent or 'someone'} wants to pay {r.to} {dollars(r.amount_cents)}."
-        if r.reason:
-            prompt += f" For: {r.reason}."
-        if check is not None:
-            prompt += f" That's outside its passport: {check.reason}."
+        prompt = ""  # you typed it yourself: just "Verification required: speak ..."
+        if agent or check is not None:  # someone else is asking: say who, what and why
+            prompt = f"{agent or 'An agent'} wants to pay {r.to} {dollars(r.amount_cents)}."
+            if r.reason:
+                prompt += f" For: {r.reason}."
+            if check is not None:
+                prompt += f" That's outside its passport: {check.reason}."
 
         if not MIC.acquire(timeout=max(0.0, self.left())):
             raise TipTimeout("timed out waiting for the mic")
@@ -124,7 +128,7 @@ class Job:
         finally:
             MIC.release()
         if vc.declined:
-            return self._res("denied", via="voice", message=f"declined by {contract.OWNER}",
+            return self._res("denied", via="voice", message="declined",
                              voice=vc, passport=check)
         if not vc.passed:
             why = "wrong words" if not vc.words_ok else "wrong voice"
@@ -230,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
         job = Job(req, tip_id, deadline)
         self.server.results[tip_id] = TipResult(status="pending", id=tip_id, to=req.to,
                                                 amount_cents=req.amount_cents)
-        t = threading.Thread(target=self._finish, args=(job,), daemon=True)
+        t = threading.Thread(target=self._finish, args=(job,), daemon=True, name=f"tip-job-{tip_id}")
         t.start()
         t.join(max(0.0, job.left()))
         if job.result is None:
@@ -253,6 +257,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _get_tip(self, tip_id: str):
         res = self.server.results.get(tip_id)
+        if res is None:  # paid by another `tip` process or before a restart: the ledger knows
+            e = contract.load("ledger").get(tip_id)
+            if e is not None:
+                res = TipResult(status="paid", id=e.id, via=e.via, to=e.to, amount_cents=e.amount_cents,
+                                receipt_url=e.receipt_url, message=f"paid {e.to} {dollars(e.amount_cents)} via {e.via}")
         if res is None:
             return self._send(404, {"status": "error", "message": f"no tip {tip_id}"})
         self._send(200, res.to_dict())
@@ -268,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                                   expires_s=int(d.get("expires_s") or 24 * 3600))
         except Exception as e:
             return self._send(400, {"status": "error", "message": f"bad passport request: {e}"})
-        prompt = (f"{contract.OWNER.title()}, issue a passport for {req.agent}: up to "
+        prompt = (f"Issue a passport for {req.agent}: up to "
                   f"{dollars(req.max_cents)} per payment, {dollars(req.daily_cents)} per day, "
                   f"to {', '.join(req.to)}.")
         if not MIC.acquire(timeout=float(contract.TIMEOUT_S)):
@@ -339,7 +348,7 @@ def _close_card(job: Job, res: TipResult) -> None:
         elif res.status == "timeout":
             screen.verdict(False, "TIMED OUT")
         elif res.status == "denied" and res.voice is not None and res.voice.declined:
-            screen.verdict(False, f"DECLINED BY {contract.OWNER.upper()}")
+            screen.verdict(False, "DECLINED")
         elif res.status == "denied":
             screen.verdict(False, f"DENIED: {res.message}")
         else:

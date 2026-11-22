@@ -23,12 +23,19 @@ _ASCII = str.maketrans({"█": "#", "░": "-", "┌": "+", "┐": "+", "└": "
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _vt_ok: bool | None = None
 _countdown: "_Countdown | None" = None
+# Set by `tip` when it runs the pipeline in its own terminal (no separate tipd):
+OUT = None      # stream for the screen; stderr there, so `--json` stdout stays clean
+QUIET = False   # True: only "Verification required. Speak: ..." (tip --dev shows everything)
+
+
+def _out():
+    return OUT or sys.stdout
 
 
 # ---------------------------------------------------------------- terminal plumbing
 def _tty() -> bool:
     try:
-        return bool(sys.stdout.isatty())
+        return bool(_out().isatty())
     except Exception:
         return False
 
@@ -52,7 +59,7 @@ def _enable_vt() -> bool:
 
 def on() -> bool:
     """Is the card screen shown at all?"""
-    return _tty()
+    return _tty() and not QUIET
 
 
 def _ansi() -> bool:
@@ -72,7 +79,7 @@ def rev(t): return _sty(t, "1", "7")
 
 def _unicode_ok() -> bool:
     try:
-        "█░┌─│●✓→…·".encode(sys.stdout.encoding or "ascii")
+        "█░┌─│●✓→…·".encode(_out().encoding or "ascii")
         return True
     except Exception:
         return False
@@ -83,11 +90,12 @@ def _write(s: str) -> None:
         try:
             if not _unicode_ok():
                 s = s.translate(_ASCII)
+            out = _out()
             try:
-                sys.stdout.write(s)
+                out.write(s)
             except UnicodeEncodeError:
-                sys.stdout.write(s.translate(_ASCII).encode("ascii", "replace").decode("ascii"))
-            sys.stdout.flush()
+                out.write(s.translate(_ASCII).encode("ascii", "replace").decode("ascii"))
+            out.flush()
         except Exception:
             pass
 
@@ -112,7 +120,7 @@ def _rows(text: str, style=None) -> list[str]:
 
 def plain(text: str) -> None:
     """A one-line log, only when there's no screen (piped / tests)."""
-    if not on():
+    if not on() and not QUIET:
         _write(text + "\n")
 
 
@@ -178,6 +186,9 @@ def speaking() -> None:
 
 
 def say(phrase: str) -> None:
+    if QUIET:
+        _write(f"Verification required: speak {phrase}\n")
+        return
     line("say:  " + bold(f"“{phrase.upper()}”"))
 
 

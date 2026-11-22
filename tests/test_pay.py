@@ -21,7 +21,7 @@ def notified(monkeypatch):
     calls = []
     monkeypatch.setattr(pay.contacts, "notify", lambda *a, **k: calls.append((a, k)) or True)
     # run the background notification inline so tests can see it
-    monkeypatch.setattr(pay.threading, "Thread", lambda target, args=(), kwargs=None, daemon=None:
+    monkeypatch.setattr(pay.threading, "Thread", lambda target, args=(), kwargs=None, **_:
                         types.SimpleNamespace(start=lambda: target(*args, **(kwargs or {}))))
     return calls
 

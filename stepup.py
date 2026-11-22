@@ -143,7 +143,9 @@ def _one_round(prompt: str, threshold: Optional[float] = None, label: str = "") 
 
     if label:
         screen.line(screen.bold(label))
-    wav = _say_then_record(f"{prompt} After the beep, say: {phrase}. Or say decline.", phrase)
+    # "Verification required: speak <phrase>", then the beep; when someone else asked, they can also decline
+    ask = f"Verification required: speak {phrase}." + (" Or say decline." if prompt else "")
+    wav = _say_then_record(f"{prompt} {ask}".strip(), phrase)
 
     transcript = eleven.transcribe(wav) or ""
     words_ok = bool(transcript) and bool(eleven.phrase_match(transcript, phrase))
