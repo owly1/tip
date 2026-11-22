@@ -1,0 +1,2 @@
+weatherapi==2.4.1
+tinycache==0.9.0
