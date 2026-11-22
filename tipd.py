@@ -21,13 +21,14 @@ from contract import PassportCheck, PassportRequest, TipRequest, TipResult, norm
 
 try:  # keys live in .env; fine to run without it in fake mode
     from dotenv import load_dotenv
+    load_dotenv(contract.HOME / ".env")  # where `tip enroll` saves keys (wins over a repo .env); works for pipx
     load_dotenv()
-    load_dotenv(contract.HOME / ".env")  # where `tip enroll` saves keys; works for a pipx install too
     contract.OWNER = os.environ.get("TIP_OWNER") or contract.OWNER  # a name set in .env, not only the shell
 except Exception:
     pass
 
 MIC = threading.Lock()  # one mic, one speaker: one Voice ID at a time
+CANCEL = stepup.CANCEL  # a one-terminal `tip` got Ctrl-C: stop the Voice ID, don't start a charge
 
 
 def dollars(cents: int) -> str:
@@ -110,7 +111,8 @@ class Job:
         else:
             self.lines.append("no passport → voice ID")
 
-        prompt = ""  # you typed it yourself: just "Verification required: speak ..."
+        # always say who and how much: an agent tip can't detect must never get a blind "speak ..."
+        prompt = f"Pay {r.to} {dollars(r.amount_cents)}."
         if agent or check is not None:  # someone else is asking: say who, what and why
             prompt = f"{agent or 'An agent'} wants to pay {r.to} {dollars(r.amount_cents)}."
             if r.reason:
@@ -138,6 +140,8 @@ class Job:
 
     def _pay(self, via, approver, agent, voice, check) -> TipResult:
         r = self.req
+        if CANCEL.is_set():
+            raise TipTimeout("cancelled before payment; nothing was charged")
         if self.timed_out or self.left() <= 0:
             raise TipTimeout("timed out before payment; nothing was charged")
         payment = contract.load("pay").charge(r.to, r.amount_cents, r.currency,

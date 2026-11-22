@@ -187,7 +187,7 @@ def speaking() -> None:
 
 def say(phrase: str) -> None:
     if QUIET:
-        _write(f"Verification required: speak {phrase}\n")
+        _write(f"{dim('Verification required:')} speak {bold(phrase)}\n")
         return
     line("say:  " + bold(f"“{phrase.upper()}”"))
 

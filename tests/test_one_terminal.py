@@ -47,7 +47,10 @@ def test_pays_in_this_process_and_json_stays_clean(local, capsys):
 def test_short_output_by_default(local, capsys):
     assert cli.main(["sam", "5"]) == 0
     out, err = capsys.readouterr()
-    assert out.startswith("✓ transfer approved · $5.00 to @sam · https://")
+    lines = out.splitlines()
+    assert lines[0] == "✓ transfer approved  $5.00 → @sam"  # plain when not a terminal
+    assert lines[1].split() == ["receipt", lines[1].split()[1]] and lines[1].split()[1].startswith("https://")
+    assert lines[2].split()[:2] == ["tip", "id"] and lines[2].split()[2].startswith("tp_")
     assert err.strip().startswith("Verification required: speak ")
     assert "score" not in out + err  # details are --dev only
 
@@ -142,3 +145,27 @@ def test_a_dropped_connection_is_never_rerun_locally(local, monkeypatch, capsys)
     monkeypatch.setattr(urllib.request, "urlopen", dropped)
     assert cli.main(["sam", "5"]) == 1
     assert len(calls) == 1 and cli._LOCAL is None
+
+
+def test_prints_from_the_pipeline_never_reach_json_stdout(local, monkeypatch, capsys):
+    import contract as c
+    real = c.FAKES["audio"].record
+    monkeypatch.setattr(c.FAKES["audio"], "record", lambda s: print("[audio] mic: Test Mic") or real(s))
+    assert cli.main(["sam", "5", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["status"] == "paid" and "[audio] mic" in err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="flock")
+def test_only_one_voice_id_at_a_time_across_processes(local):
+    """Two one-terminal tips must never talk and listen over each other."""
+    import fcntl
+    import stepup
+    other = open(local / "mic.lock", "a+b")  # another tip process holding the mic
+    fcntl.flock(other, fcntl.LOCK_EX)
+    with pytest.raises(TimeoutError, match="another tip is using the mic"):
+        with stepup._mic(timeout=0.3):
+            pass
+    other.close()  # it finished
+    with stepup._mic(timeout=0.3):
+        pass

@@ -39,21 +39,33 @@ KEYS = [  # (name, severity if missing, what it's for)
 ]
 
 
+def _read_env(p: Path) -> dict:
+    try:
+        from dotenv import dotenv_values
+        return dict(dotenv_values(p, encoding="utf-8"))
+    except ImportError:
+        vals = {}
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                vals[k.strip()] = v.strip().strip('"').strip("'")
+        return vals
+
+
 def _env_values() -> tuple[dict, Path | None]:
+    """Same precedence as tipd: your shell, then ~/.tip/.env (tip enroll), then a repo .env."""
+    found, vals = None, {}
     for p in (Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"):
         if p.is_file():
-            try:
-                from dotenv import dotenv_values
-                vals = dict(dotenv_values(p, encoding="utf-8"))
-            except ImportError:
-                vals = {}
-                for line in p.read_text(encoding="utf-8").splitlines():
-                    if "=" in line and not line.lstrip().startswith("#"):
-                        k, v = line.split("=", 1)
-                        vals[k.strip()] = v.strip().strip('"').strip("'")
-            names = {k for k, _, _ in KEYS}
-            return {**vals, **{k: v for k, v in os.environ.items() if k in names}}, p
-    return {k: v for k, v in os.environ.items()}, None
+            found, vals = p, _read_env(p)
+            break
+    home = contract.HOME / ".env"
+    if home.is_file():
+        found, vals = found or home, {**vals, **_read_env(home)}
+    if found is None:
+        return {k: v for k, v in os.environ.items()}, None
+    names = {k for k, _, _ in KEYS}
+    return {**vals, **{k: v for k, v in os.environ.items() if k in names}}, found
 
 
 def check_keys() -> list[tuple[str, str, str]]:
@@ -108,7 +120,9 @@ def check_tipd() -> list[tuple[str, str, str]]:
         with urllib.request.urlopen(url + "/health", timeout=2) as r:
             body = json.loads(r.read().decode("utf-8"))
     except Exception:  # noqa: BLE001
-        return [(WARN, "tipd", f"not running at {url} (start it with: tipd)")]
+        if os.environ.get("TIPD_URL"):
+            return [(WARN, "tipd", f"not running at {url} (start it with: tipd)")]
+        return [(OK, "tipd", "not running: tip runs everything in your terminal")]
     fake = body.get("fake") or []
     return [(OK, "tipd", f"running at {url}"),
             (WARN if fake else OK, "tipd modules", "fake: " + ", ".join(fake) if fake else "all real")]

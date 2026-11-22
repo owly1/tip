@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import time
 
 import numpy as np
@@ -67,8 +68,8 @@ def record(seconds: float) -> bytes:
     global _announced
     dev = _device("TIP_MIC")
     info = _input_info(dev)
-    if not _announced:
-        print(f"[audio] mic: {info['name']}", flush=True)
+    if not _announced and os.environ.get("TIP_DEV") == "1":
+        print(f"[audio] mic: {info['name']}", file=sys.stderr, flush=True)
         _announced = True
     try:
         x = sd.rec(int(round(seconds * SAMPLE_RATE)), samplerate=SAMPLE_RATE, channels=1,

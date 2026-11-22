@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
+from contextlib import contextmanager
 
 import contract
 import screen
@@ -70,6 +72,36 @@ def is_decline(transcript: str) -> bool:
     return bool(words) and (any(w in DECLINE_WORDS for w in words) or words in (["no"], ["nope"]))
 
 
+CANCEL = threading.Event()  # a one-terminal `tip` got Ctrl-C: stop talking and listening, never charge
+
+
+@contextmanager
+def _mic(timeout: float = float(contract.TIMEOUT_S)):
+    """One Voice ID at a time on this computer, across every tip process: two would talk and
+    listen over each other (one-terminal tips are separate processes, so tipd's MIC lock isn't enough)."""
+    contract.HOME.mkdir(parents=True, exist_ok=True)
+    f = open(contract.HOME / "mic.lock", "a+b")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if CANCEL.is_set() or time.monotonic() > deadline:
+                    raise TimeoutError("another tip is using the mic; try again when it's done")
+                time.sleep(0.1)
+        yield
+    finally:
+        f.close()  # closing the file releases the lock
+
+
 def _say_then_record(text: str, phrase: str) -> bytes:
     """Play the prompt, beep, then record. Recording starts only after playback ends,
     so the mic never hears the laptop saying the phrase."""
@@ -79,6 +111,8 @@ def _say_then_record(text: str, phrase: str) -> bytes:
         screen.speaking()
         screen.say(phrase)
         audio.play((_voice_out or contract.load("eleven")).speak(text))
+        if CANCEL.is_set():
+            raise TimeoutError("cancelled")
         audio.beep()
         _set_challenge("listening", phrase)
         screen.listening(contract.RECORD_S)
@@ -99,7 +133,20 @@ STRICT_ROUNDS = int(os.environ.get("TIP_STRICT_ROUNDS", "2"))
 STRICT_THRESHOLD = float(os.environ.get("TIP_STRICT_THRESHOLD", "0.53"))
 
 
+def _warm_voice_model() -> None:
+    """Load the voice model BEFORE speaking: loading it (torch) while the prompt plays makes the audio stutter."""
+    warm = getattr(contract.load("voice"), "_get_model", None)
+    if warm:
+        warm()
+
+
 def voice_id(prompt: str, amount_cents: Optional[int] = None) -> VoiceCheck:
+    _warm_voice_model()
+    with _mic():
+        return _voice_id(prompt, amount_cents)
+
+
+def _voice_id(prompt: str, amount_cents: Optional[int] = None) -> VoiceCheck:
     rounds = STRICT_ROUNDS if (amount_cents or 0) >= STRICT_OVER_CENTS and STRICT_ROUNDS > 1 else 1
     if rounds == 1:
         return _one_round(prompt)
@@ -191,6 +238,12 @@ def _one_round(prompt: str, threshold: Optional[float] = None, label: str = "") 
 
 
 def enroll(samples: int = 3) -> None:
+    _warm_voice_model()
+    with _mic():
+        _enroll(samples)
+
+
+def _enroll(samples: int = 3) -> None:
     voice = contract.load("voice")
     wavs = []
     screen.card_open("ENROLL VOICEPRINT", [f"{samples} samples · read each phrase after the beep"])

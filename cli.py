@@ -7,6 +7,7 @@ for this one command (one terminal, nothing left running afterwards); tipd's che
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -133,6 +134,7 @@ def _start_local() -> bool:
     screen.OUT = sys.stderr  # the human sees it; --json on stdout stays clean for agents
     screen.QUIET = _QUIET and not _DEV
     import tipd
+    tipd.CANCEL.clear()
     srv = tipd.make_server("127.0.0.1", 0)
     th = threading.Thread(target=srv.serve_forever, daemon=True)
     th.start()
@@ -140,28 +142,42 @@ def _start_local() -> bool:
     return True
 
 
-def _finish_local() -> None:
-    """Before exiting, let a payment, its ledger line and the recipient's notification finish."""
+def _finish_local() -> list:
+    """Before exiting, let a payment, its ledger line and the recipient's notification finish.
+    Returns the payments that went through (so Ctrl-C can report them)."""
     global _LOCAL, _LOCAL_URL
     if _LOCAL is None:
-        return
+        return []
     srv, _ = _LOCAL
-    deadline = time.monotonic() + 30
-    for t in threading.enumerate():
-        if t.name.startswith("tip-") and t is not threading.current_thread():
-            t.join(max(0.0, deadline - time.monotonic()))
-    srv.shutdown()
-    srv.server_close()
+    import signal
+    old = signal.signal(signal.SIGINT, signal.SIG_IGN)  # a 2nd Ctrl-C mid-charge would lose the ledger line
+    try:
+        deadline = time.monotonic() + 30
+        with contextlib.redirect_stdout(sys.stderr):
+            while time.monotonic() < deadline:
+                left = [t for t in threading.enumerate() if t.name.startswith("tip-") and t is not threading.current_thread()]
+                if not left:
+                    break
+                left[0].join(max(0.0, deadline - time.monotonic()))
+        paid = [r for r in srv.results.values() if r.status == "paid"]
+        srv.shutdown()
+        srv.server_close()
+    finally:
+        signal.signal(signal.SIGINT, old)
     _LOCAL, _LOCAL_URL = None, None
+    return paid
 
 
 def _request(method: str, path: str, body: Optional[dict] = None, timeout: float = 15):
     """Returns (http_status, parsed_json). Raises _TipdDown or TimeoutError."""
-    try:
-        return _send(method, path, body, timeout)
-    except _TipdAbsent:
-        if not _start_local():
-            raise
+    if _LOCAL is None:
+        try:
+            return _send(method, path, body, timeout)
+        except _TipdAbsent:
+            if not _start_local():
+                raise
+    # while tipd's code runs in this process, whatever it prints is for the human: keep --json stdout clean
+    with contextlib.redirect_stdout(sys.stderr):
         return _send(method, path, body, timeout)
 
 
@@ -260,25 +276,55 @@ def format_result(result: TipResult, currency: str = contract.CURRENCY) -> list[
     return lines
 
 
+def _styled() -> bool:
+    """Colours and links only for a person at a terminal: never for agents, pipes or --json."""
+    try:
+        tty = sys.stdout.isatty()
+    except Exception:
+        return False
+    return tty and not os.environ.get("NO_COLOR") and (os.name != "nt" or "WT_SESSION" in os.environ)
+
+
+def _c(text: str, code: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m" if _styled() else text
+
+
+_LINK_TERMINALS = {"iTerm.app", "vscode", "WezTerm", "ghostty", "Hyper", "Tabby"}
+
+
+def _href(url: str, label: str) -> str:
+    """A short clickable label where the terminal supports links (OSC 8), else the whole URL on its own."""
+    if _styled() and (os.environ.get("TERM_PROGRAM") in _LINK_TERMINALS
+                      or "WT_SESSION" in os.environ or "KITTY_WINDOW_ID" in os.environ):
+        return f"\x1b]8;;{url}\x1b\\{_c(label, '4;36')}\x1b]8;;\x1b\\"
+    return url
+
+
 def short_result(result: TipResult, currency: str = contract.CURRENCY) -> list[str]:
     """The default one-liner; --dev shows format_result's details."""
     s, v = result.status, result.voice
     if s == "paid":
-        return [f"✓ transfer approved · {money(result.amount_cents, currency)} to @{result.to}"
-                + (f" · {result.receipt_url}" if result.receipt_url else "")]
+        lines = [_c("✓ transfer approved", "1;32") + f"  {_c(money(result.amount_cents, currency), '1')} → @{result.to}"]
+        if result.receipt_url:
+            lines.append(f"  {_c('receipt', '2')}  {_href(result.receipt_url, 'view receipt ↗')}")
+        if result.id:
+            lines.append(f"  {_c('tip id', '2')}   {result.id}")
+        return lines
+    if s == "voice_failed" and v is not None and v.score is None and v.method == "ecapa" and v.words_ok:
+        return [_c("✗ no voiceprint yet: run tip enroll", "1;31")]
     if v is not None and getattr(v, "declined", False):
-        return ["✗ declined"]
+        return [_c("✗ declined", "1;31")]
     if s == "voice_failed":
         if v is not None and not v.words_ok:
-            return ["✗ invalid words"]
-        return ["✗ invalid voice" if v is not None and not v.voice_ok else "✗ voice check failed"]
+            return [_c("✗ invalid words", "1;31")]
+        return [_c("✗ invalid voice" if v is not None and not v.voice_ok else "✗ voice check failed", "1;31")]
     if s == "denied":
-        return [f"✗ denied: {result.message or 'not allowed'}"]
+        return [_c("✗ denied", "1;31") + f": {result.message or 'not allowed'}"]
     if s == "timeout":
-        return ["✗ timed out"]
+        return [_c("✗ timed out", "1;31")]
     if s == "pending":
         return [f"… pending {result.id or ''}".rstrip()]
-    return [f"✗ error: {result.message or 'unknown error'}"]
+    return [_c("✗ error", "1;31") + f": {result.message or 'unknown error'}"]
 
 
 def _say(lines, stream=None):
@@ -455,8 +501,8 @@ def _load_env() -> None:
         from dotenv import load_dotenv
     except ImportError:
         return
+    load_dotenv(contract.HOME / ".env")  # what `tip enroll` saved wins over a repo .env
     load_dotenv()
-    load_dotenv(contract.HOME / ".env")
 
 
 def _check_key(name: str, value: str) -> Optional[str]:
@@ -466,12 +512,18 @@ def _check_key(name: str, value: str) -> Optional[str]:
             return "that isn't a Stripe test key (it starts with sk_test_); tip never uses live keys"
         req = urllib.request.Request("https://api.stripe.com/v1/balance", headers={"Authorization": f"Bearer {value}"})
     else:
+        if value.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")):
+            return "that's a Stripe key, not an ElevenLabs key"
         req = urllib.request.Request("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": value})
     try:
         with urllib.request.urlopen(req, timeout=10):
             return None
     except urllib.error.HTTPError as e:
-        return f"the service rejected that key (HTTP {e.code})" if e.code in (401, 403) else None
+        if e.code == 401:
+            return "the service rejected that key (HTTP 401)"
+        if e.code == 403:  # a restricted key that works but can't run this check: keep it
+            _err("  (the key works but can't run this check; saving it anyway)")
+        return None
     except Exception:
         _err("  (couldn't reach the service to check it; saving it anyway)")
         return None
@@ -494,10 +546,13 @@ def _setup_keys(force: bool = False) -> bool:
     import getpass
     _load_env()
     for name, what in _KEYS:
-        if os.environ.get(name) and not force:
+        if os.environ.get(name, "").strip() not in ("", "sk_test_") and not force:  # sk_test_ = .env.example
             continue
         for _ in range(3):
-            value = getpass.getpass(f"{what}: ").strip()
+            try:
+                value = getpass.getpass(f"{what} (Enter to skip): ").strip()
+            except EOFError:
+                value = ""
             if not value:
                 _err(f"  skipped; add it later with: tip enroll --keys")
                 break
@@ -525,6 +580,8 @@ def _enroll(argv: list[str]) -> int:
         return contract.Exit.ERROR
     if not a.json and sys.stdin.isatty() and not _setup_keys(force=a.keys):
         return contract.Exit.ERROR
+    if a.keys:  # `tip enroll --keys` only updates keys; your voiceprint stays
+        return contract.Exit.PAID
     _QUIET = False  # enrollment shows the full screen: which sample, the phrase, the countdown
     if not a.json:
         _err(f"recording {a.samples} samples: read each phrase after the beep. "
@@ -646,7 +703,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     except _TipdDown:
         _err("tipd isn't running. Start it with: tipd")
         return contract.Exit.ERROR
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
+        if _LOCAL is not None:
+            import tipd
+            tipd.CANCEL.set()  # stop before charging if it hasn't started
+            try:  # and stop talking/listening now, so a new `tip` never plays over this one
+                import sounddevice
+                sounddevice.stop()
+            except Exception:
+                pass
+            paid = _finish_local()
+            if paid:  # too late: it was already being charged. Say so, don't claim "cancelled"
+                _say(short_result(paid[-1]))
+                _err("(it was already being charged when you pressed Ctrl-C)")
+                return contract.Exit.PAID
         _err("cancelled")
         return contract.Exit.ERROR
     finally:
