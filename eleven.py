@@ -263,7 +263,8 @@ def captcha_check(wav: bytes) -> Optional[bool]:
 def clone(name: str, wavs: list[bytes]) -> str:
     try:
         files = [(f"sample{i}.wav", io.BytesIO(w), "audio/wav") for i, w in enumerate(wavs)]
-        return _api().voices.ivc.create(name=name, files=files,
+        # a non-empty labels dict: without it the API answers 400 "invalid_labels"
+        return _api().voices.ivc.create(name=name, files=files, labels={"source": "tip"},
                                         request_options={"timeout_in_seconds": 60, "max_retries": 1}).voice_id
     except RuntimeError:
         raise
