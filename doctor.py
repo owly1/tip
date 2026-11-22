@@ -51,7 +51,8 @@ def _env_values() -> tuple[dict, Path | None]:
                     if "=" in line and not line.lstrip().startswith("#"):
                         k, v = line.split("=", 1)
                         vals[k.strip()] = v.strip().strip('"').strip("'")
-            return {**vals, **{k: v for k, v in os.environ.items() if k in dict(KEYS)}}, p
+            names = {k for k, _, _ in KEYS}
+            return {**vals, **{k: v for k, v in os.environ.items() if k in names}}, p
     return {k: v for k, v in os.environ.items()}, None
 
 
