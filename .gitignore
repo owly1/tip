@@ -7,3 +7,4 @@ voiceprint*
 .DS_Store
 tip.md*
 tip.txt
+*.egg-info/

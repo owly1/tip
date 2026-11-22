@@ -7,6 +7,7 @@ from __future__ import annotations
 import secrets
 
 import contract
+import screen
 from contract import VoiceCheck
 
 ADJECTIVES = ["purple", "silver", "quiet", "golden", "rusty", "happy", "frozen", "brave",
@@ -32,14 +33,20 @@ def random_phrase() -> str:
                      _number_words(11 + secrets.randbelow(89))])
 
 
-def _say_then_record(text: str) -> bytes:
+def _say_then_record(text: str, phrase: str) -> bytes:
     """Play the prompt, beep, then record. Recording starts only after playback ends,
     so the mic never hears the laptop saying the phrase."""
     audio = contract.load("audio")
     eleven = contract.load("eleven")
+    screen.speaking()
+    screen.say(phrase)
     audio.play(eleven.speak(text))
     audio.beep()
-    return audio.record(contract.RECORD_S)
+    screen.listening(contract.RECORD_S)
+    try:
+        return audio.record(contract.RECORD_S)
+    finally:
+        screen.done_listening()
 
 
 def voice_id(prompt: str) -> VoiceCheck:
@@ -52,10 +59,11 @@ def voice_id(prompt: str) -> VoiceCheck:
     else:
         phrase, method = random_phrase(), "ecapa"
 
-    wav = _say_then_record(f"{prompt} After the beep, say: {phrase}")
+    wav = _say_then_record(f"{prompt} After the beep, say: {phrase}", phrase)
 
     transcript = eleven.transcribe(wav) or ""
     words_ok = bool(transcript) and bool(eleven.phrase_match(transcript, phrase))
+    screen.heard(transcript, words_ok)
 
     threshold = float(voice.THRESHOLD)
     score = None
@@ -77,11 +85,14 @@ def voice_id(prompt: str) -> VoiceCheck:
             voice_ok = score is not None and score >= threshold
 
     passed = words_ok and voice_ok
+    screen.score_bar(score, threshold, voice_ok, method, captcha_result)
+    if note:
+        screen.line(note)
     score_s = f"{score:.2f}" if score is not None else "n/a"
-    print(f"[voice id] {method} | phrase: {phrase!r} | heard: {transcript!r} "
+    screen.plain(f"[voice id] {method} | phrase: {phrase!r} | heard: {transcript!r} "
           f"| words {'ok' if words_ok else 'WRONG'} | score {score_s} vs {threshold:.2f} "
           f"| voice {'ok' if voice_ok else 'WRONG'} | {'PASS' if passed else 'FAIL'}"
-          + (f" | {note}" if note else ""), flush=True)
+          + (f" | {note}" if note else ""))
 
     return VoiceCheck(passed=passed, words_ok=words_ok, voice_ok=voice_ok, score=score,
                       threshold=threshold, transcript=transcript, phrase=phrase, method=method)
@@ -90,8 +101,13 @@ def voice_id(prompt: str) -> VoiceCheck:
 def enroll(samples: int = 3) -> None:
     voice = contract.load("voice")
     wavs = []
+    screen.card_open("ENROLL VOICEPRINT", [f"{samples} samples · read each phrase after the beep"])
     for i in range(1, samples + 1):
-        wavs.append(_say_then_record(f"Sample {i} of {samples}. After the beep, read: {random_phrase()}"))
-        print(f"[enroll] sample {i}/{samples} recorded", flush=True)
+        phrase = random_phrase()
+        screen.line(screen.bold(f"sample {i}/{samples}"))
+        wavs.append(_say_then_record(f"Sample {i} of {samples}. After the beep, read: {phrase}", phrase))
+        screen.plain(f"[enroll] sample {i}/{samples} recorded")
     voice.enroll(wavs)
-    print("[enroll] voiceprint saved", flush=True)
+    screen.verdict(True, "VOICEPRINT SAVED")
+    screen.card_close()
+    screen.plain("[enroll] voiceprint saved")
