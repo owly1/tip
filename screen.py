@@ -166,9 +166,9 @@ def card_close(result_text: str = "", url: str = "") -> None:
     out = []
     if result_text:
         out += _rows(result_text)
-    if url:
-        out += _rows("receipt " + url, dim)
     out.append("└" + "─" * (W + 2) + "┘")
+    if url:  # outside the box, one unbroken line, so ⌘-click opens it
+        out.append("receipt: " + url)
     _write("\n".join(out) + "\n\n")
 
 

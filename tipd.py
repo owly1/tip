@@ -120,9 +120,12 @@ class Job:
             if self.left() <= 0:
                 raise TipTimeout("timed out before Voice ID")
             self.show_card()
-            vc = stepup.voice_id(prompt)
+            vc = stepup.voice_id(prompt, r.amount_cents)
         finally:
             MIC.release()
+        if vc.declined:
+            return self._res("denied", via="voice", message=f"declined by {contract.OWNER}",
+                             voice=vc, passport=check)
         if not vc.passed:
             why = "wrong words" if not vc.words_ok else "wrong voice"
             return self._res("voice_failed", via="voice", message=f"Voice ID failed: {why}",
@@ -284,8 +287,8 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             MIC.release()
         if not vc.passed:
-            why = "wrong words" if not vc.words_ok else "wrong voice"
-            screen.verdict(False, f"REFUSED: {why}")
+            why = "declined" if vc.declined else "wrong words" if not vc.words_ok else "wrong voice"
+            screen.verdict(False, "DECLINED" if vc.declined else f"REFUSED: {why}")
             screen.card_close("no passport issued")
             screen.plain(f"[tipd] passport for {req.agent} -> voice_failed ({why})")
             return self._send(200, TipResult(status="voice_failed", via="voice", voice=vc,
@@ -335,6 +338,8 @@ def _close_card(job: Job, res: TipResult) -> None:
             screen.verdict(False, f"REFUSED: {why}")
         elif res.status == "timeout":
             screen.verdict(False, "TIMED OUT")
+        elif res.status == "denied" and res.voice is not None and res.voice.declined:
+            screen.verdict(False, f"DECLINED BY {contract.OWNER.upper()}")
         elif res.status == "denied":
             screen.verdict(False, f"DENIED: {res.message}")
         else:

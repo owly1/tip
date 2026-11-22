@@ -83,6 +83,7 @@ class VoiceCheck:
     transcript: str = ""
     phrase: str = ""
     method: Literal["captcha", "ecapa"] = "ecapa"
+    declined: bool = False              # the human said "decline" instead of the phrase
 
 
 @dataclass

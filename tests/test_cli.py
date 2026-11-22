@@ -16,7 +16,7 @@ AGENT_ENV = ("CLAUDECODE", "CURSOR_AGENT", "CURSOR_TRACE_ID", "TIP_PASSPORT")
 PAID = {"status": "paid", "id": "tp_ab12", "via": "passport", "to": "sam", "amount_cents": 500,
         "receipt_url": "https://pay.stripe.com/receipts/x", "message": "", "voice": None, "passport": None}
 VOICE = {"passed": False, "words_ok": True, "voice_ok": False, "score": 0.21, "threshold": 0.5,
-         "transcript": "purple otter seventeen", "phrase": "purple otter seventeen", "method": "ecapa"}
+         "transcript": "purple otter seventeen", "phrase": "purple otter seventeen", "method": "ecapa", "declined": False}
 
 
 class Stub:

@@ -59,14 +59,26 @@ def run(url: str, make_wav: Callable[[str], bytes], loop: bool = False,
     polls = 0
     while max_polls is None or polls < max_polls:
         polls += 1
-        ch = fetch(url)
+        try:
+            ch = fetch(url)
+        except NoEndpoint:
+            raise
+        except Exception as e:  # tipd restarting, network blip: keep waiting, don't die
+            say(f"tipd not answering ({type(e).__name__}); retrying...")
+            sleep(1.0)
+            continue
         cid, phase = ch.get("id"), ch.get("phase")
         if ch.get("active") and cid != seen_id and phase in ("speaking", "listening"):
             seen_id = cid
             phrase = ch.get("phrase", "")
             say(f'heard challenge "{phrase}"')
             t0 = time.perf_counter()
-            wav = make_wav(phrase)
+            try:
+                wav = make_wav(phrase)
+            except Exception as e:
+                say(f"synthesis failed: {e}")
+                sleep(POLL_S)
+                continue
             say(f"synthesizing in cloned voice... ({time.perf_counter() - t0:.1f} s)")
             pending = (cid, wav)
             ch = fetch(url)  # synthesis took time; re-read the phase before waiting again

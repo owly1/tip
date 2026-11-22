@@ -64,7 +64,7 @@ def no_voice(monkeypatch):
     calls = []
     real = stepup.voice_id
 
-    def spy(prompt):
+    def spy(prompt, *a, **k):
         calls.append(prompt)
         return real(prompt)
     monkeypatch.setattr(stepup, "voice_id", spy)

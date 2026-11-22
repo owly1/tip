@@ -87,18 +87,46 @@ def record(seconds: float) -> bytes:
     return to_wav(np.clip(x, -1.0, 1.0))
 
 
+LEAD_IN_S = 0.15   # silence before each sound: the speakers crackle while they wake up
+TAIL_S = 0.05
+
+
+def _out_rate() -> int:
+    try:
+        return int(sd.query_devices(_device("TIP_SPEAKER"), kind="output")["default_samplerate"])
+    except Exception:
+        return SAMPLE_RATE
+
+
+def _prep(samples: np.ndarray, sr: int, out_sr: int) -> np.ndarray:
+    """Play at the speaker's native rate (no CoreAudio rate switch), with 5 ms fades and
+    a silent lead-in, so the device wake-up static lands on silence instead of speech."""
+    x = samples.astype(np.float32)
+    if sr != out_sr and x.size:
+        x = _resample(x, sr, out_sr)
+    n = min(int(0.005 * out_sr), x.size // 2)
+    if n:
+        ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        x[:n] *= ramp
+        x[-n:] *= ramp[::-1]
+    return np.concatenate([np.zeros(int(LEAD_IN_S * out_sr), np.float32), x,
+                           np.zeros(int(TAIL_S * out_sr), np.float32)])
+
+
 def play(wav: bytes) -> None:
     samples, sr = from_wav(wav)
     if samples.size == 0:
         return
-    sd.play(samples, sr, device=_device("TIP_SPEAKER"), blocking=True)
+    out_sr = _out_rate()
+    sd.play(_prep(samples, sr, out_sr), out_sr, device=_device("TIP_SPEAKER"), blocking=True)
 
 
 def beep() -> None:
-    t = np.arange(int(0.15 * SAMPLE_RATE)) / SAMPLE_RATE
+    out_sr = _out_rate()
+    t = np.arange(int(0.15 * out_sr)) / out_sr
     fade = np.minimum(1.0, np.minimum(t, t[-1] - t) / 0.01)  # 10 ms ramps, no click
     tone = (0.3 * np.sin(2 * np.pi * 880 * t) * fade).astype(np.float32)
-    sd.play(tone, SAMPLE_RATE, device=_device("TIP_SPEAKER"), blocking=True)
+    sd.play(_prep(tone, out_sr, out_sr), out_sr, device=_device("TIP_SPEAKER"), blocking=True)
     time.sleep(0.05)  # let the tail die out so the recording doesn't start on it
 
 

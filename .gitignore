@@ -18,3 +18,4 @@ tip.txt
 *.mp4
 recordings/
 voice_samples/
+attack.log
