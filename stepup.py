@@ -5,6 +5,7 @@ Modules come from contract.load() at call time so TIP_FAKE switching works.
 from __future__ import annotations
 
 import secrets
+import threading
 
 import contract
 import screen
@@ -18,6 +19,25 @@ _ONES = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "ni
 _TEENS = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
           "seventeen", "eighteen", "nineteen"]
 _TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+
+# Current challenge, read by tipd's demo-only GET /challenge (see attack.py).
+_CH_LOCK = threading.Lock()
+_CH = {"active": False, "phase": None, "phrase": "", "id": 0}
+
+
+def _set_challenge(phase, phrase: str = "", new: bool = False) -> None:
+    with _CH_LOCK:
+        if new:
+            _CH["id"] += 1
+        _CH["active"] = phase is not None
+        _CH["phase"] = phase
+        _CH["phrase"] = phrase if phase is not None else ""
+
+
+def current_challenge() -> dict:
+    with _CH_LOCK:
+        return dict(_CH)
 
 
 def _number_words(n: int) -> str:
@@ -38,15 +58,20 @@ def _say_then_record(text: str, phrase: str) -> bytes:
     so the mic never hears the laptop saying the phrase."""
     audio = contract.load("audio")
     eleven = contract.load("eleven")
-    screen.speaking()
-    screen.say(phrase)
-    audio.play(eleven.speak(text))
-    audio.beep()
-    screen.listening(contract.RECORD_S)
     try:
-        return audio.record(contract.RECORD_S)
+        _set_challenge("speaking", phrase, new=True)
+        screen.speaking()
+        screen.say(phrase)
+        audio.play(eleven.speak(text))
+        audio.beep()
+        _set_challenge("listening", phrase)
+        screen.listening(contract.RECORD_S)
+        try:
+            return audio.record(contract.RECORD_S)
+        finally:
+            screen.done_listening()
     finally:
-        screen.done_listening()
+        _set_challenge(None)
 
 
 def voice_id(prompt: str) -> VoiceCheck:

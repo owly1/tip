@@ -6,6 +6,7 @@ at call time so TIP_FAKE switching works.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import threading
 import time
@@ -186,6 +187,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._post_enroll()
             if method == "GET" and path.startswith("/verify/"):
                 return self._get_verify(path[len("/verify/"):])
+            if method == "GET" and path == "/challenge" and demo_attack_on():
+                # Demo only (TIP_DEMO_ATTACK=1): hands attack.py the live phrase. A real
+                # attacker would hear it from the speaker anyway; this skips a transcription step.
+                return self._send(200, stepup.current_challenge())
             if method == "GET" and path == "/health":
                 return self._send(200, {"ok": True, "fake": sorted(n for n in contract.MODULES if contract.is_fake(n))})
             self._send(404, {"status": "error", "message": f"no route {method} {path}"})
@@ -348,6 +353,10 @@ class TipServer(ThreadingHTTPServer):
         self.results: dict[str, TipResult] = {}
 
 
+def demo_attack_on() -> bool:
+    return os.environ.get("TIP_DEMO_ATTACK") == "1"
+
+
 def make_server(host: str = contract.TIPD_HOST, port: int = contract.TIPD_PORT) -> TipServer:
     return TipServer((host, port))
 
@@ -357,6 +366,11 @@ def main() -> None:
     fake = sorted(n for n in contract.MODULES if contract.is_fake(n))
     host, port = srv.server_address[:2]
     screen.banner(f"http://{host}:{port}", fake)
+    if demo_attack_on():
+        msg = "  demo attack endpoint ON (GET /challenge)"
+        screen.plain(msg.strip())
+        if screen.on():
+            screen._write(screen.dim(msg) + "\n\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
