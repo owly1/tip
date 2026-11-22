@@ -27,6 +27,10 @@ from elevenlabs.core.api_error import ApiError
     ("purpel otter seventeen", "purple otter seventeen"),    # typo within tolerance
     ("golden pelican ninety nine", "golden pelican 99"),     # digits on the expected side
     ("rusty heron 11", "rusty heron eleven"),
+    ("HollowOtter70", "hollow otter seventy"),               # Scribe glues short phrases
+    ("hollowotterseventy", "hollow otter seventy"),
+    ("HollowOtter70.", "hollow otter seventy"),
+    ("BraveMoose73", "brave moose seventy three"),
 ])
 def test_phrase_passes(said, expected):
     assert eleven.phrase_match(said, expected)
@@ -49,6 +53,10 @@ def test_phrase_passes(said, expected):
     ("frozen gecko eighteen", "frozen gecko eighty"),
     ("frozen gecko nineteen", "frozen gecko ninety"),
     ("frozen gecko sixteen", "frozen gecko sixty"),
+    ("HollowOtter7", "hollow otter seventy"),                # glued, wrong number
+    ("hollowotterseven", "hollow otter seventy"),
+    ("HollowOtter71", "hollow otter seventy"),
+    ("SilverOtter70", "hollow otter seventy"),
 ])
 def test_phrase_fails(said, expected):
     assert not eleven.phrase_match(said, expected)

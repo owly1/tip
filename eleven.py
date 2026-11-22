@@ -153,6 +153,7 @@ def num_words(n: int) -> str:
 
 
 def normalize(s: str) -> list[str]:
+    s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)  # Scribe glues words: "HollowOtter70"
     s = s.lower().replace("-", " ")
     s = re.sub(r"\d+", lambda m: f" {num_words(int(m.group()))} ", s)
     s = re.sub(r"[^a-z\s]", " ", s)
@@ -187,7 +188,7 @@ def phrase_match(said: str, expected: str) -> bool:
             i += 1
             if i == len(want):
                 return True
-    return False
+    return "".join(got) == "".join(want)  # all glued, no capitals: "hollowotterseventy"
 
 
 # ---------------------------------------------------------------- PVC captcha (off by default)
