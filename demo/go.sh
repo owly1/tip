@@ -12,4 +12,4 @@ OUT="$(tip passport issue --agent claude-code --to @weatherapi,@tinycache \
 export TIP_PASSPORT="$(python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])' <<<"$OUT")"
 echo "passport issued. starting Claude Code (manual mode: auto mode blocks payments even with the allow rule)"
 echo 'try: "tip the maintainer of weatherapi $5 as thanks", then "...$200"'
-exec claude --permission-mode manual
+exec claude --permission-mode auto
