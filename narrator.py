@@ -2,9 +2,10 @@
 
 speak(text) -> WAV bytes, same as eleven.speak, so stepup swaps one call.
 
-- A soothing, natural ElevenLabs voice (TIP_NARRATOR_VOICE: a name from VOICES or a voice
-  id, default sarah) on the most natural model (TIP_NARRATOR_MODEL, default
-  eleven_multilingual_v2), at 24 kHz instead of 16 kHz.
+- Terry's cloned voice by default (TIP_NARRATOR_VOICE: a name from VOICES or a voice id)
+  on eleven_multilingual_v2 (TIP_NARRATOR_MODEL; eleven_v3 sounds richer but takes ~5 s),
+  at 24 kHz instead of 16 kHz. The clone lives on the team's ElevenLabs account, so other
+  keys fall back to eleven.speak.
 - The fixed parts (FIXED) are generated once and saved under HOME/narrator, so they cost
   nothing at payment time. Pre-generate them on the demo laptop with `python narrator.py warm`.
 - The variable parts (names, amounts, the phrase) are generated live, in parallel, in the
@@ -30,13 +31,15 @@ import soundfile as sf
 import contract
 from contract import HOME
 
-VOICES = {  # soothing, natural female voices from the account's premade set
+VOICES = {
+    "terry": "0mXs2TUI9vqsfPZAlR1z",    # instant clone of Terry (the team's narrator, not an approver)
+    # soothing, natural female voices from the account's premade set
     "sarah": "EXAVITQu4vr4xnSDxMaL",    # mature, reassuring
     "jessica": "cgSgspJ2msm6clMCkdW9",  # warm, conversational
     "lily": "pFZP5JQG7iQjIQuC4Bku",     # velvety, British
     "matilda": "XrExE9yKIg1WjnnlVkGX",  # calm, professional
 }
-DEFAULT_VOICE = "sarah"
+DEFAULT_VOICE = "terry"
 DEFAULT_MODEL = "eleven_multilingual_v2"
 RATE = 24000
 FIXED = ("After the beep, say:", "After the beep, read:", "Or say decline.", "One more.")
